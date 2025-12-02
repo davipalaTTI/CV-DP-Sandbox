@@ -1,0 +1,17 @@
+# Ignore everything by default
+*
+
+# Don't ignore this .gitignore file
+!.gitignore
+
+# Track only these project files
+!config_manager.py
+!counter_logic.py
+!detection_engine.py
+!gui_setup.py
+!main.py
+!progress_window.py
+!results_export.py
+!training_mode.py
+!utils.py
+!video_processor.py

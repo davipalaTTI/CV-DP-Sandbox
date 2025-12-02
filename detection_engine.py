@@ -132,7 +132,7 @@ class DetectionEngine:
                 'persist': persist_tracks,
                 'conf': self.confidence_threshold,
                 'verbose': False,
-                'tracker': "C:/Users/D-Palacios/PycharmProjects/TH-TEST/.venv/Lib/site-packages/ultralytics/cfg/trackers/botsort.yaml"
+                'tracker': "C:/Users/D-Palacios/PycharmProjects/CV-DP-Sandbox/.venv/Lib/site-packages/ultralytics/cfg/trackers/botsort.yaml"
             }
 
             # Add class filtering if specified
