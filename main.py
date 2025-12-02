@@ -283,7 +283,7 @@ def main() -> int:
         # Handle config file loading
         if args.config:
             logger.info(f"Loading configuration from {args.config}")
-            # TODO: Implement config file loading in ConfigManager
+            # TO DO: Implement config file loading in ConfigManager
             if not Path(args.config).exists():
                 logger.error(f"Config file not found: {args.config}")
                 return 1
