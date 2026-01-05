@@ -1564,16 +1564,23 @@ class HeatmapAccumulator:
         vmax = float(heat.max())
         if vmax <= 0:
             return np.zeros_like(heat, dtype=np.uint8)
-
         # Normalize
         norm = heat / vmax
 
         # Apply gamma correction for enhanced contrast
         norm = np.power(norm, 1.0 / self.gamma)
 
+        # Create a mask of actual activity before the sigmoid distorts it
+        # This identifies pixels that truly have heat vs. empty background
+        activity_mask = heat > 0.0001
+
         # Apply sigmoid-like curve to enhance mid-tones
         # This makes moderately hot areas more visible
         norm = 1.0 / (1.0 + np.exp(-10 * (norm - 0.3)))
+
+        # Force background pixels back to true zero (transparent)
+        # This removes the "red tint" floor created by the sigmoid function
+        norm[~activity_mask] = 0.0
 
         # Scale to 8-bit
         heat_u8 = (255.0 * norm).astype(np.uint8)

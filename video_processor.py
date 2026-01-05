@@ -211,7 +211,7 @@ class VideoProcessor:
 
             # Define all variables properly
             interval_sec = float(max(1, int(self.segment_split_minutes) * 60))
-            alpha = float(getattr(self.config, "heatmap_alpha", 0.35))
+            alpha = float(getattr(self.config, "heatmap_alpha", 1 ))
             cmap_name = getattr(self.config, "heatmap_colormap", "HOT")
             out_dir = str(Path(self.config.output_folder) / "visualizations")
             radius_px = int(getattr(self.config, "heatmap_radius_px", 10))
@@ -484,7 +484,7 @@ class VideoProcessor:
 
             # Define all variables properly
             interval_sec = float(max(1, int(self.segment_split_minutes) * 60))
-            alpha = float(getattr(self.config, "heatmap_alpha", 0.35))
+            alpha = float(getattr(self.config, "heatmap_alpha", 1))
             cmap_name = getattr(self.config, "heatmap_colormap", "HOT")
             out_dir = str(Path(self.config.output_folder) / "visualizations")
             radius_px = int(getattr(self.config, "heatmap_radius_px", 10))

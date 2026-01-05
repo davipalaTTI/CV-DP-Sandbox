@@ -89,7 +89,7 @@ class AppConfig:
     # --- Heatmap options ---
     enable_heatmap: bool = False
     heatmap_interval_sec: float = 600.0
-    heatmap_alpha: float = 0.35
+    heatmap_alpha: float = 1
     heatmap_colormap: str = "hot"
     heatmap_radius_px: int = 10
     heatmap_decay: float = 0.0
@@ -767,7 +767,7 @@ class ConfigManager:
             # heatmap defaults …
             enable_heatmap=False,
             heatmap_interval_sec=600.0,
-            heatmap_alpha=0.35,
+            heatmap_alpha=1,
             heatmap_colormap="hot",
             heatmap_radius_px=10,
             heatmap_decay=0.0,
