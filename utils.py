@@ -71,23 +71,24 @@ class PerformanceTimer:
         return self.end_time - self.start_time
 
 
+from collections import deque
+
+
 class MovingAverage:
-    """Efficient moving average calculator"""
+    """Efficient moving average calculator using deque"""
 
     def __init__(self, window_size: int = 10):
         self.window_size = window_size
-        self.values = []
+        self.values = deque(maxlen=window_size)
         self.sum = 0.0
 
     def update(self, value: float) -> float:
         """Add new value and return current average"""
+        if len(self.values) == self.window_size:
+            self.sum -= self.values[0]  # Remove oldest from sum
+
         self.values.append(value)
         self.sum += value
-
-        if len(self.values) > self.window_size:
-            removed = self.values.pop(0)
-            self.sum -= removed
-
         return self.sum / len(self.values)
 
     def get_average(self) -> float:
@@ -101,12 +102,13 @@ class MovingAverage:
 
 
 class FPSCounter:
-    """Efficient FPS counter with moving average"""
+    """Efficient FPS counter with deque-based moving average"""
 
     def __init__(self, window_size: int = 30):
         self.window_size = window_size
-        self.frame_times = []
+        self.frame_times = deque(maxlen=window_size)
         self.last_time = time.perf_counter()
+        self._sum = 0.0
 
     def update(self) -> float:
         """Update FPS counter and return current FPS"""
@@ -114,20 +116,20 @@ class FPSCounter:
         frame_time = current_time - self.last_time
         self.last_time = current_time
 
-        self.frame_times.append(frame_time)
-        if len(self.frame_times) > self.window_size:
-            self.frame_times.pop(0)
+        if len(self.frame_times) == self.window_size:
+            self._sum -= self.frame_times[0]
 
-        if len(self.frame_times) > 1:
-            avg_frame_time = sum(self.frame_times) / len(self.frame_times)
-            return 1.0 / avg_frame_time if avg_frame_time > 0 else 0.0
+        self.frame_times.append(frame_time)
+        self._sum += frame_time
+
+        if self._sum > 0:
+            return len(self.frame_times) / self._sum
         return 0.0
 
     def get_fps(self) -> float:
         """Get current FPS without updating"""
-        if len(self.frame_times) > 1:
-            avg_frame_time = sum(self.frame_times) / len(self.frame_times)
-            return 1.0 / avg_frame_time if avg_frame_time > 0 else 0.0
+        if self._sum > 0:
+            return len(self.frame_times) / self._sum
         return 0.0
 
 
@@ -1564,23 +1566,16 @@ class HeatmapAccumulator:
         vmax = float(heat.max())
         if vmax <= 0:
             return np.zeros_like(heat, dtype=np.uint8)
+
         # Normalize
         norm = heat / vmax
 
         # Apply gamma correction for enhanced contrast
         norm = np.power(norm, 1.0 / self.gamma)
 
-        # Create a mask of actual activity before the sigmoid distorts it
-        # This identifies pixels that truly have heat vs. empty background
-        activity_mask = heat > 0.0001
-
         # Apply sigmoid-like curve to enhance mid-tones
         # This makes moderately hot areas more visible
         norm = 1.0 / (1.0 + np.exp(-10 * (norm - 0.3)))
-
-        # Force background pixels back to true zero (transparent)
-        # This removes the "red tint" floor created by the sigmoid function
-        norm[~activity_mask] = 0.0
 
         # Scale to 8-bit
         heat_u8 = (255.0 * norm).astype(np.uint8)

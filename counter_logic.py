@@ -21,6 +21,27 @@ from config_manager import CountingLine, CountingZone
 import datetime
 
 
+def sanitize_dwell_time(dwell_seconds: float) -> float:
+    """
+    Validate and sanitize dwell time values.
+    Returns 0.0 for invalid values (negative or unreasonably large).
+    
+    Args:
+        dwell_seconds: Raw dwell time value
+        
+    Returns:
+        Sanitized dwell time (0.0 if invalid, otherwise rounded to 2 decimals)
+    """
+    try:
+        dwell = float(dwell_seconds) if dwell_seconds is not None else 0.0
+        # Invalid if negative or greater than 24 hours (86400 seconds)
+        if dwell < 0 or dwell > 86400:
+            return 0.0
+        return round(dwell, 2)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 class CrossingDirection(Enum):
     """Direction of line crossing"""
     UP = "up"
@@ -122,6 +143,26 @@ class CountingEvent:
     avg_speed: float = 0.0  # Average speed at time of event
     speed_units: str = 'pxps'  # Units for the speed value
     dwell_seconds: float = 0.0  # Dwell time for zone events
+    confidence: float = 0.0  # Detection confidence
+
+    def to_dict(self) -> Dict:
+        """Convert event to dictionary for export"""
+        return {
+            'event_id': self.event_id,
+            'track_id': self.track_id,
+            'class_id': self.class_id,
+            'class_name': self.class_name,
+            'line_name': self.line_name or '',
+            'zone_name': self.zone_name or '',
+            'direction': self.direction or '',
+            'timestamp': self.timestamp,
+            'position': self.position,
+            'actual_datetime': self.actual_datetime.isoformat() if self.actual_datetime else '',
+            'speed': self.avg_speed,
+            'speed_units': self.speed_units,
+            'dwell_seconds': sanitize_dwell_time(self.dwell_seconds),
+            'confidence': self.confidence
+        }
 
 class LineCounter:
     """Handles line crossing detection and counting"""
@@ -619,10 +660,19 @@ class ZoneCounter:
         # Update object's zone presence
         object_state.zone_presence[self.config.name] = is_in_zone
 
+        # Use timestamp for entry time tracking (convert to float if datetime)
+        if timestamp is not None:
+            if hasattr(timestamp, 'timestamp'):
+                entry_timestamp = timestamp.timestamp()
+            else:
+                entry_timestamp = float(timestamp)
+        else:
+            entry_timestamp = time.time()
+
         # Handle zone entry
         if is_in_zone and not was_in_zone:
-            # Object entered zone - record entry time
-            object_state.zone_entry_times[self.config.name] = time.time()
+            # Object entered zone - record entry time using video timestamp
+            object_state.zone_entry_times[self.config.name] = entry_timestamp
 
             self.objects_in_zone.add(object_state.track_id)
 
@@ -633,7 +683,7 @@ class ZoneCounter:
 
                 # Create entry event (will be updated with dwell time later)
                 event = CountingEvent(
-                    event_id=f"zone_{self.config.name}_{object_state.track_id}_{time.time()}",
+                    event_id=f"zone_{self.config.name}_{object_state.track_id}_{entry_timestamp}",
                     track_id=object_state.track_id,
                     class_id=object_state.class_id,
                     class_name=object_state.class_name,
@@ -660,15 +710,16 @@ class ZoneCounter:
         elif not is_in_zone and was_in_zone:
             # Object exited zone - calculate dwell time
             if self.config.name in object_state.zone_entry_times:
-                entry_time = object_state.zone_entry_times[self.config.name]
-                dwell_time = time.time() - entry_time
+                zone_entry_time = object_state.zone_entry_times[self.config.name]
+                dwell_time = sanitize_dwell_time(entry_timestamp - zone_entry_time)  # FIXED: Sanitize calculation
 
                 # Only record dwell time if >= 0.5 seconds (filter border cases)
                 if dwell_time >= 0.5:
                     # Store accumulated dwell time
                     if self.config.name not in object_state.zone_dwell_times:
-                        object_state.zone_dwell_times[self.config.name] = 0
-                    object_state.zone_dwell_times[self.config.name] += dwell_time
+                        object_state.zone_dwell_times[self.config.name] = 0.0
+                    # Add sanitized dwell time (already sanitized above, but double-check)
+                    object_state.zone_dwell_times[self.config.name] += sanitize_dwell_time(dwell_time)
 
                     self.logger.info(
                         f"{object_state.class_name} (ID:{object_state.track_id}) exited zone {self.config.name}, "
@@ -766,7 +817,7 @@ class ObjectCounter:
     """Main counter class that manages all counting operations"""
 
     def __init__(self, lines_config: List[CountingLine], zones_config: List[CountingZone],
-                 frame_size: Tuple[int, int], exclusion_zones: List = None, max_track_age: float = 30.0):
+                 frame_size: Tuple[int, int], exclusion_zones: List = None, max_track_age: float = 60.0):
         self.frame_size = frame_size
         self.max_track_age = max_track_age
 
@@ -993,7 +1044,7 @@ class ObjectCounter:
                     # Attach speed & initial dwell time (0)
                     event.avg_speed = round(float(getattr(obj_state, "avg_speed_converted", 0.0)), 2)
                     event.speed_units = getattr(obj_state, "speed_units", "pxps")
-                    event.dwell_seconds = 0.0
+                    event.dwell_seconds = 0.0  # ENSURE THIS IS 0.0, not some other value
 
                     new_events.append(event)
                     self.counting_events.append(event)
@@ -1006,15 +1057,16 @@ class ObjectCounter:
                             entry_time = obj_state.zone_entry_times[zone_counter.config.name]
                             current_dwell = current_time - entry_time
 
-                            # Update the event's dwell time
-                            self.zone_entry_events[event_key].dwell_seconds = round(current_dwell, 2)
+                            # FIXED: Use sanitize function instead of manual validation
+                            self.zone_entry_events[event_key].dwell_seconds = sanitize_dwell_time(current_dwell)
 
                         # Also check if object has exited (not in zone anymore)
                         if not obj_state.zone_presence.get(zone_counter.config.name, False):
                             # Object exited - finalize with total accumulated dwell time
                             if zone_counter.config.name in obj_state.zone_dwell_times:
                                 final_dwell = obj_state.zone_dwell_times[zone_counter.config.name]
-                                self.zone_entry_events[event_key].dwell_seconds = round(final_dwell, 2)
+                                # FIXED: Sanitize final dwell time
+                                self.zone_entry_events[event_key].dwell_seconds = sanitize_dwell_time(final_dwell)
 
                             # Remove from tracking since it's finalized
                             del self.zone_entry_events[event_key]
@@ -1181,6 +1233,10 @@ class ObjectCounter:
                 # FIXED: Get dwell time from event or calculate from object state
                 dwell_sec = getattr(event, 'dwell_seconds', 0.0)
 
+                # Validate dwell time - if negative or unreasonably large, set to 0
+                if dwell_sec < 0 or dwell_sec > 86400:  # More than 24 hours is probably an error
+                    dwell_sec = 0.0
+
                 if dwell_sec == 0.0 and event.track_id in self.object_states:
                     obj_state = self.object_states[event.track_id]
 
@@ -1190,13 +1246,21 @@ class ObjectCounter:
                         if event.zone_name in obj_state.zone_entry_times:
                             entry_time = obj_state.zone_entry_times[event.zone_name]
                             dwell_sec = time.time() - entry_time
+
+                            # Validate calculated dwell time
+                            if dwell_sec < 0 or dwell_sec > 86400:
+                                dwell_sec = 0.0
                     else:
                         # Object has left zone - use stored dwell time
                         if event.zone_name in obj_state.zone_dwell_times:
                             dwell_sec = obj_state.zone_dwell_times[event.zone_name]
 
+                            # Validate stored dwell time
+                            if dwell_sec < 0 or dwell_sec > 86400:
+                                dwell_sec = 0.0
+
                 event_dict['dwell_time'] = f"{dwell_sec:.2f}s" if dwell_sec > 0 else ""
-                event_dict['dwell_seconds'] = float(dwell_sec)
+                event_dict['dwell_seconds'] = sanitize_dwell_time(dwell_sec)
 
             events_list.append(event_dict)
 
@@ -1319,4 +1383,5 @@ class ObjectCounter:
                         current_session = current_time - obj_state.zone_entry_times[zone_name]
                         total_dwell += current_session
 
-                event.dwell_seconds = round(total_dwell, 2)
+                # FIXED: Sanitize final dwell time
+                event.dwell_seconds = sanitize_dwell_time(total_dwell)

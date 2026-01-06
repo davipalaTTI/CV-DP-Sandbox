@@ -135,7 +135,7 @@ class InteractiveGUI:
             # Load preview frame
             if not self._load_preview_frame():
                 self.logger.error("Failed to load preview frame")
-                return [], []
+                return [], [], []  # lines, zones, exclusion_zones
 
             # Run interactive loop
             self._run_interactive_loop()

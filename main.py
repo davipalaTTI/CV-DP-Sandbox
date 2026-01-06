@@ -33,9 +33,15 @@ class Application:
         self.video_processor: Optional[VideoProcessor] = None
         self.logger = logging.getLogger(__name__)
 
-    def initialize(self) -> bool:
+    # In main.py, replace the initialize method in the Application class:
+
+    def initialize(self, config_file: Optional[str] = None, skip_gui: bool = False) -> bool:
         """
-        Initialize the application with user configuration
+        Initialize the application with user configuration or from file
+
+        Args:
+            config_file: Optional path to configuration file to load
+            skip_gui: If True, skip GUI setup when config_file is provided
 
         Returns:
             True if initialization successful, False otherwise
@@ -43,86 +49,141 @@ class Application:
         try:
             self.logger.info(f"Starting Multi-Line Object Counter v{__version__}")
 
-            # Step 1: Get initial configuration from user
-            self.logger.info("Step 1: Getting initial configuration...")
             config_manager = ConfigManager()
-            self.config = config_manager.get_initial_config()
 
-            if self.config is None:
-                self.logger.info("Configuration canceled by user")
-                return False
+            # Try to load config from file if provided
+            if config_file and Path(config_file).exists():
+                self.logger.info(f"Loading configuration from file: {config_file}")
+                self.config = config_manager.load_config(config_file)
 
-            self.logger.info(f"Configuration loaded:")
-            self.logger.info(f"  Model: {self.config.model_path}")
-            self.logger.info(f"  Input: {self.config.input_source}")
-            self.logger.info(f"  Output: {self.config.output_folder}")
-            self.logger.info(f"  Camera mode: {self.config.is_camera}")
-            self.logger.info(f"  Zones enabled: {self.config.enable_zones}")
+                if self.config is None:
+                    self.logger.error("Failed to load configuration file")
+                    return False
 
-            # Step 2: Initialize detection engine
-            self.logger.info("Step 2: Initializing detection engine...")
-            self.detection_engine = DetectionEngine(
-                model_path=self.config.model_path,
-                confidence_threshold=self.config.confidence_threshold,
-                device=self.config.device
-            )
+                self.logger.info("Configuration loaded from file successfully")
 
-            # Warm up the model
-            self.detection_engine.warmup()
-            self.logger.info("Detection engine initialized and warmed up")
+                # Initialize detection engine
+                self.logger.info("Initializing detection engine...")
+                self.detection_engine = DetectionEngine(
+                    model_path=self.config.model_path,
+                    confidence_threshold=self.config.confidence_threshold,
+                    device=self.config.device
+                )
 
-            # Step 3: Interactive GUI setup for lines and zones
-            self.logger.info("Step 3: Starting interactive setup...")
-            gui_setup = InteractiveGUI(
-                config=self.config,
-                class_names=self.detection_engine.class_names
-            )
+                # Warm up the model
+                self.detection_engine.warmup()
+                self.logger.info("Detection engine initialized and warmed up")
 
-            # Get all three configurations
-            lines_config, zones_config, exclusion_zones = gui_setup.run_setup()
+                # Skip GUI setup if requested and we have lines configured
+                if skip_gui and self.config.lines_config:
+                    self.logger.info("Skipping GUI setup (using saved configuration)")
+                else:
+                    # Run GUI setup even with loaded config (for modifications)
+                    self.logger.info("Running interactive setup...")
+                    gui_setup = InteractiveGUI(
+                        config=self.config,
+                        class_names=self.detection_engine.class_names
+                    )
 
-            if not lines_config:
-                self.logger.error("No counting lines configured. Exiting.")
-                return False
+                    lines_config, zones_config, exclusion_zones = gui_setup.run_setup()
 
-            # Update config with GUI results
-            self.config.lines_config = lines_config
-            self.config.zones_config = zones_config
-            self.config.exclusion_zones = exclusion_zones  # Add this
+                    if not lines_config:
+                        self.logger.error("No counting lines configured. Exiting.")
+                        return False
 
-            # NEW: Configure exclusion zones in detection engine
-            if exclusion_zones and self.config.input_source:
-                # Get frame shape from first frame
-                cap = cv2.VideoCapture(self.config.input_source)
+                    # Update config with GUI results
+                    self.config.lines_config = lines_config
+                    self.config.zones_config = zones_config
+                    self.config.exclusion_zones = exclusion_zones
+
+                    # Save the updated configuration
+                    config_path = Path(self.config.output_folder) / "config.json"
+                    if config_manager.save_config(self.config, config_path):
+                        self.logger.info(f"Configuration saved to: {config_path}")
+                        self.logger.info("You can reuse this config with: --config config.json --no-gui")
+
+            else:
+                # No config file - go through normal GUI setup
+                self.logger.info("Step 1: Getting initial configuration...")
+                self.config = config_manager.get_initial_config()
+
+                if self.config is None:
+                    self.logger.info("Configuration canceled by user")
+                    return False
+
+                self.logger.info("Configuration loaded")
+
+                # Initialize detection engine
+                self.logger.info("Step 2: Initializing detection engine...")
+                self.detection_engine = DetectionEngine(
+                    model_path=self.config.model_path,
+                    confidence_threshold=self.config.confidence_threshold,
+                    device=self.config.device
+                )
+
+                self.detection_engine.warmup()
+                self.logger.info("Detection engine initialized and warmed up")
+
+                # Check if user loaded a complete config and wants to skip GUI setup
+                skip_interactive = getattr(self.config, '_skip_gui_setup', False)
+                
+                if skip_interactive and self.config.lines_config:
+                    self.logger.info("Using loaded configuration (skipping interactive setup)")
+                else:
+                    # Interactive GUI setup
+                    self.logger.info("Step 3: Starting interactive setup...")
+                    gui_setup = InteractiveGUI(
+                        config=self.config,
+                        class_names=self.detection_engine.class_names
+                    )
+
+                    lines_config, zones_config, exclusion_zones = gui_setup.run_setup()
+
+                    if not lines_config:
+                        self.logger.error("No counting lines configured. Exiting.")
+                        return False
+
+                    # Update config
+                    self.config.lines_config = lines_config
+                    self.config.zones_config = zones_config
+                    self.config.exclusion_zones = exclusion_zones
+
+                    # Save configuration for future use
+                    config_path = Path(self.config.output_folder) / "config.json"
+                    if config_manager.save_config(self.config, config_path):
+                        self.logger.info(f"Configuration saved to: {config_path}")
+                        self.logger.info("You can reuse this config with: --config {config_path} --no-gui")
+
+            # Common initialization for both paths
+            # Configure exclusion zones in detection engine
+            if self.config.exclusion_zones and self.config.input_source:
+                if self.config.is_camera:
+                    cap = cv2.VideoCapture(self.config.input_source)
+                else:
+                    cap = cv2.VideoCapture(str(self.config.input_source))
                 ret, frame = cap.read()
                 if ret:
-                    self.detection_engine.set_exclusion_zones(exclusion_zones, frame.shape)
+                    self.detection_engine.set_exclusion_zones(self.config.exclusion_zones, frame.shape)
                 cap.release()
 
-            self.logger.info(f"Setup completed:")
-            self.logger.info(f"  Lines configured: {len(lines_config)}")
-            self.logger.info(f"  Zones configured: {len(zones_config)}")
-            self.logger.info(f"  Exclusion zones: {len(exclusion_zones)}")
-
-            # Build the global allowed class set from lines + zones
+            # Build allowed class set
             selected = set()
             for L in self.config.lines_config:
                 selected.update(int(c) for c in getattr(L, "classes", []) or [])
             for Z in self.config.zones_config:
                 selected.update(int(c) for c in getattr(Z, "classes", []) or [])
 
-            # Apply to config + engine (so detection & drawing are filtered)
             if selected:
                 self.config.allowed_classes = selected
                 self.detection_engine.update_allowed_classes(selected)
                 self.logger.info(f"Restricting to classes: {sorted(selected)}")
 
             self.logger.info(f"Setup completed:")
-            self.logger.info(f"  Lines configured: {len(lines_config)}")
-            self.logger.info(f"  Zones configured: {len(zones_config)}")
-            self.logger.info(f"  Heatmap enabled: {self.config.enable_heatmap}")
+            self.logger.info(f"  Lines configured: {len(self.config.lines_config)}")
+            self.logger.info(f"  Zones configured: {len(self.config.zones_config)}")
+            self.logger.info(f"  Exclusion zones: {len(self.config.exclusion_zones)}")
 
-            # Step 4: Initialize video processor
+            # Initialize video processor
             self.logger.info("Step 4: Initializing video processor...")
             self.video_processor = VideoProcessor(
                 config=self.config,
@@ -280,16 +341,18 @@ def main() -> int:
         # Create application instance
         app = Application()
 
-        # Handle config file loading
-        if args.config:
-            logger.info(f"Loading configuration from {args.config}")
-            # TO DO: Implement config file loading in ConfigManager
-            if not Path(args.config).exists():
-                logger.error(f"Config file not found: {args.config}")
-                return 1
+        # Check for config file and no-gui flag
+        config_file = args.config
+        skip_gui = args.no_gui
 
-        # Initialize application
-        if not app.initialize():
+        # Validate no-gui usage
+        if skip_gui and not config_file:
+            logger.error("--no-gui requires --config to be specified")
+            print("\nError: --no-gui requires a configuration file to be specified with --config")
+            return 1
+
+        # Initialize application with config options
+        if not app.initialize(config_file=config_file, skip_gui=skip_gui):
             logger.info("Application initialization failed or was canceled")
             return 0
 

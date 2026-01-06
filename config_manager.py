@@ -89,7 +89,7 @@ class AppConfig:
     # --- Heatmap options ---
     enable_heatmap: bool = False
     heatmap_interval_sec: float = 600.0
-    heatmap_alpha: float = 1
+    heatmap_alpha: float = 0.35
     heatmap_colormap: str = "hot"
     heatmap_radius_px: int = 10
     heatmap_decay: float = 0.0
@@ -119,6 +119,9 @@ class AppConfig:
 
     # Video output settings
     output_resolution: str = "720p"  # Options: "720p", "480p", "1080p", "original"
+
+    # Parallel processing settings
+    max_parallel_videos: int = 1  # Number of videos to process simultaneously (1-4 recommended)
 
 
 class ConfigManager:
@@ -167,6 +170,7 @@ class ConfigManager:
             'annotate_speed': tk.BooleanVar(value=True),
             'frame_skip': tk.IntVar(value=1),
             'interpolate_tracks': tk.BooleanVar(value=True),
+            'max_parallel_videos': tk.IntVar(value=1),  # Number of videos to process in parallel
 
         }
 
@@ -344,6 +348,7 @@ class ConfigManager:
                 annotate_speed=bool(config_vars['annotate_speed'].get()),
                 frame_skip=int(config_vars['frame_skip'].get()),
                 interpolate_tracks=bool(config_vars['interpolate_tracks'].get()),
+                max_parallel_videos=int(config_vars['max_parallel_videos'].get()),
                 # --- NEW: training params ---
                 training_mode=training_vars['training_mode'].get(),
                 training_interval_seconds=float(training_vars['training_interval'].get() or 5.0),
@@ -506,6 +511,22 @@ class ConfigManager:
             variable=config_vars['interpolate_tracks']  # Use directly from config_vars
         ).grid(row=0, column=4, columnspan=4, sticky="w", padx=5, pady=2)
 
+        # Parallel videos processing
+        tk.Label(frame_skip_frame, text="Parallel videos:").grid(row=1, column=0, sticky="w", padx=5, pady=4)
+        
+        parallel_combo = ttk.Combobox(
+            frame_skip_frame,
+            textvariable=config_vars['max_parallel_videos'],
+            state="readonly",
+            values=["1", "2", "3", "4"],
+            width=8
+        )
+        parallel_combo.grid(row=1, column=1, sticky="w", padx=5, pady=4)
+        parallel_combo.set("1")
+        
+        tk.Label(frame_skip_frame, text="(higher = faster but uses more GPU memory)").grid(
+            row=1, column=2, columnspan=4, sticky="w", padx=5, pady=4)
+
         # --- Training Mode (optional) ---
         row += 1
         training_frame = tk.LabelFrame(root, text="Training Mode (optional)", font=("Arial", 10, "bold"))
@@ -542,10 +563,116 @@ class ConfigManager:
 
         row += 1
 
+        # Load config function
+        def load_existing_config():
+            """Load an existing configuration file"""
+            nonlocal result_config
+            
+            filetypes = [
+                ("Config Files", "*.json *.yaml *.yml"),
+                ("JSON Files", "*.json"),
+                ("YAML Files", "*.yaml *.yml"),
+                ("All Files", "*.*")
+            ]
+            filename = filedialog.askopenfilename(
+                title="Select Configuration File",
+                filetypes=filetypes,
+                parent=root
+            )
+            if not filename:
+                return
+            
+            try:
+                # Load the config
+                loaded_config = self.load_config(filename)
+                if loaded_config is None:
+                    messagebox.showerror("Error", "Failed to load configuration file.", parent=root)
+                    return
+                
+                # Validate essential paths
+                errors = []
+                if not Path(loaded_config.model_path).exists():
+                    errors.append(f"Model file not found: {loaded_config.model_path}")
+                
+                if not loaded_config.is_camera:
+                    if not Path(loaded_config.input_source).exists():
+                        errors.append(f"Input source not found: {loaded_config.input_source}")
+                
+                if errors:
+                    error_msg = "Configuration has invalid paths:\n\n" + "\n".join(errors)
+                    error_msg += "\n\nWould you like to load it anyway and fix the paths?"
+                    if not messagebox.askyesno("Path Validation", error_msg, parent=root):
+                        return
+                
+                # Check if config has lines configured - offer to skip setup
+                if loaded_config.lines_config:
+                    msg = f"Configuration loaded successfully!\n\n"
+                    msg += f"• {len(loaded_config.lines_config)} counting line(s)\n"
+                    msg += f"• {len(loaded_config.zones_config)} zone(s)\n"
+                    msg += f"• {len(loaded_config.exclusion_zones)} exclusion zone(s)\n\n"
+                    msg += "Would you like to use this configuration and skip to processing?\n\n"
+                    msg += "(Click 'No' to modify settings first)"
+                    
+                    if messagebox.askyesno("Configuration Loaded", msg, parent=root):
+                        # Use directly - skip GUI setup
+                        result_config = loaded_config
+                        result_config._skip_gui_setup = True  # Flag to skip interactive setup
+                        root.quit()
+                        return
+                
+                # Populate the dialog fields with loaded values
+                config_vars['model_path'].set(loaded_config.model_path)
+                config_vars['output_folder'].set(loaded_config.output_folder)
+                config_vars['enable_zones'].set(loaded_config.enable_zones)
+                config_vars['enable_heatmap'].set(loaded_config.enable_heatmap)
+                config_vars['save_video'].set(loaded_config.save_video)
+                config_vars['confidence'].set(loaded_config.confidence_threshold)
+                config_vars['device'].set(loaded_config.device)
+                config_vars['enable_speed'].set(loaded_config.enable_speed)
+                config_vars['speed_units'].set(loaded_config.speed_units)
+                config_vars['meters_per_pixel'].set(str(loaded_config.meters_per_pixel))
+                config_vars['speed_smooth_window'].set(loaded_config.speed_smooth_window)
+                config_vars['annotate_speed'].set(loaded_config.annotate_speed)
+                config_vars['frame_skip'].set(loaded_config.frame_skip)
+                config_vars['interpolate_tracks'].set(loaded_config.interpolate_tracks)
+                config_vars['max_parallel_videos'].set(loaded_config.max_parallel_videos)
+                
+                # Set input type and source
+                if loaded_config.is_camera:
+                    config_vars['input_type'].set("camera")
+                    config_vars['camera_index'].set(str(loaded_config.input_source))
+                elif loaded_config.input_type == InputType.FOLDER:
+                    config_vars['input_type'].set("folder")
+                    config_vars['input_source'].set(str(loaded_config.input_source))
+                else:
+                    config_vars['input_type'].set("video")
+                    config_vars['input_source'].set(str(loaded_config.input_source))
+                
+                # Training mode settings
+                training_vars['training_mode'].set(loaded_config.training_mode)
+                training_vars['training_interval'].set(str(loaded_config.training_interval_seconds))
+                training_vars['training_autostop'].set(str(loaded_config.training_auto_stop_hours))
+                training_vars['training_confidence'].set(str(loaded_config.training_min_confidence))
+                training_vars['training_empty'].set(loaded_config.training_include_empty)
+                training_vars['training_augment'].set(loaded_config.training_augment)
+                
+                # Update field states
+                toggle_input_fields()
+                
+                messagebox.showinfo("Config Loaded", 
+                    "Configuration loaded. Review/modify settings and click Continue.", 
+                    parent=root)
+                
+            except Exception as e:
+                self.logger.error(f"Error loading config: {e}")
+                messagebox.showerror("Error", f"Failed to load configuration:\n{e}", parent=root)
+
         # Buttons
         button_frame = tk.Frame(root)
         button_frame.grid(row=row, column=0, columnspan=3, pady=20)
 
+        tk.Button(button_frame, text="Load Config...", command=load_existing_config, 
+                  width=15, bg="#2196F3", fg="white").pack(side="left", padx=10)
         tk.Button(button_frame, text="Cancel", command=cancel, width=15).pack(side="left", padx=10)
         tk.Button(button_frame, text="Continue", command=validate_and_submit,
                   width=15, bg="#4CAF50", fg="white").pack(side="left", padx=10)
@@ -616,7 +743,7 @@ class ConfigManager:
 
     def save_config(self, config: AppConfig, filepath: Union[str, Path]) -> bool:
         """
-        Save configuration to file
+        Save configuration to file including lines, zones, and exclusions
 
         Args:
             config: Configuration to save
@@ -629,11 +756,53 @@ class ConfigManager:
             filepath = Path(filepath)
             filepath.parent.mkdir(parents=True, exist_ok=True)
 
-            # Convert to dictionary
+            # Convert to dictionary with full serialization
             config_dict = self._config_to_dict(config)
 
+            # Ensure all complex objects are properly serialized
+            # Convert lines_config
+            if hasattr(config, 'lines_config') and config.lines_config:
+                config_dict['lines_config'] = [
+                    {
+                        'name': line.name,
+                        'start_norm': line.start_norm,
+                        'end_norm': line.end_norm,
+                        'direction': line.direction,
+                        'classes': line.classes,
+                        'enabled': line.enabled,
+                        'poi_mode': getattr(line, 'poi_mode', 'center')
+                    }
+                    for line in config.lines_config
+                ]
+
+            # Convert zones_config
+            if hasattr(config, 'zones_config') and config.zones_config:
+                config_dict['zones_config'] = [
+                    {
+                        'name': zone.name,
+                        'points_norm': zone.points_norm,
+                        'classes': zone.classes,
+                        'enabled': zone.enabled,
+                        'track_max_concurrent': getattr(zone, 'track_max_concurrent', False),
+                        'show_peak_overlay': getattr(zone, 'show_peak_overlay', True),
+                        'poi_mode': getattr(zone, 'poi_mode', 'center')
+                    }
+                    for zone in config.zones_config
+                ]
+
+            # Convert exclusion_zones
+            if hasattr(config, 'exclusion_zones') and config.exclusion_zones:
+                config_dict['exclusion_zones'] = [
+                    {
+                        'name': exc.name,
+                        'points_norm': exc.points_norm,
+                        'enabled': exc.enabled
+                    }
+                    for exc in config.exclusion_zones
+                ]
+
             # Determine format from extension
-            if filepath.suffix.lower() == '.yaml' or filepath.suffix.lower() == '.yml':
+            if filepath.suffix.lower() in ['.yaml', '.yml']:
                 with open(filepath, 'w') as f:
                     yaml.dump(config_dict, f, default_flow_style=False, indent=2)
             else:  # Default to JSON
@@ -713,6 +882,12 @@ class ConfigManager:
                 for zone in config_dict['zones_config']
             ]
 
+        if 'exclusion_zones' in config_dict:
+            config_dict['exclusion_zones'] = [
+                ExclusionZone(**exc) if isinstance(exc, dict) else exc
+                for exc in config_dict['exclusion_zones']
+            ]
+
         return AppConfig(**config_dict)
 
     def validate_config(self, config: AppConfig) -> List[str]:
@@ -767,7 +942,7 @@ class ConfigManager:
             # heatmap defaults …
             enable_heatmap=False,
             heatmap_interval_sec=600.0,
-            heatmap_alpha=1,
+            heatmap_alpha=0.35,
             heatmap_colormap="hot",
             heatmap_radius_px=10,
             heatmap_decay=0.0,

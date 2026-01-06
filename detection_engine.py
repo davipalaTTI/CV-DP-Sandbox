@@ -132,7 +132,7 @@ class DetectionEngine:
                 'persist': persist_tracks,
                 'conf': self.confidence_threshold,
                 'verbose': False,
-                'tracker': "C:/Users/D-Palacios/PycharmProjects/CV-DP-Sandbox/.venv/Lib/site-packages/ultralytics/cfg/trackers/botsort.yaml"
+                'tracker': self.tracker_config if self.tracker_config else 'botsort.yaml'
             }
 
             # Add class filtering if specified
@@ -211,70 +211,62 @@ class DetectionEngine:
         return masked_frame
 
     def _parse_results(self, results, frame_shape: Tuple[int, int, int]) -> List[Detection]:
-        """Optimized parsing with single GPU->CPU transfer"""
-        detections = []
-
+        """Optimized parsing with vectorized operations"""
         if not results or not results[0].boxes:
-            return detections
+            return []
 
         boxes = results[0].boxes
-
-        # Get device used if set to auto
-        try:
-            # Only override if it's still "auto"
-            if str(self.device).lower() in ("auto", "", "none", "unknown"):
-                tensor = boxes.xyxy
-                if tensor is not None and hasattr(tensor, "device"):
-                    self.device = str(tensor.device)
-        except Exception:
-            pass
-
         if boxes.xyxy is None:
-            return detections
-
-        # Single batch transfer to CPU
-        with torch.no_grad():
-            # Stack all tensors and transfer once
-            bbox_data = boxes.xyxy.cpu()
-            conf_data = boxes.conf.cpu() if boxes.conf is not None else torch.ones(len(bbox_data))
-            class_data = boxes.cls.cpu() if boxes.cls is not None else torch.zeros(len(bbox_data))
-            track_data = boxes.id.cpu() if boxes.id is not None else None
-
-            # Convert to numpy in one go
-            bbox_np = bbox_data.numpy()
-            conf_np = conf_data.numpy()
-            class_np = class_data.numpy().astype(int)
-            track_np = track_data.numpy().astype(int) if track_data is not None else [None] * len(bbox_np)
-
-        # Vectorized filtering instead of loop
-        valid_mask = conf_np >= self.confidence_threshold
-        if self.allowed_classes:
-            class_mask = np.isin(class_np, list(self.allowed_classes))
-            valid_mask &= class_mask
-
-        # Process only valid detections
-        valid_indices = np.where(valid_mask)[0]
+            return []
 
         h, w = frame_shape[:2]
 
-        for i in valid_indices:
-            # Use numpy operations
-            x1, y1, x2, y2 = bbox_np[i].astype(int)
+        # Single batch transfer to CPU and numpy
+        with torch.no_grad():
+            bbox_np = boxes.xyxy.cpu().numpy()
+            conf_np = boxes.conf.cpu().numpy() if boxes.conf is not None else np.ones(len(bbox_np))
+            class_np = boxes.cls.cpu().numpy().astype(int) if boxes.cls is not None else np.zeros(len(bbox_np),
+                                                                                                  dtype=int)
+            track_np = boxes.id.cpu().numpy().astype(int) if boxes.id is not None else np.full(len(bbox_np), -1)
 
-            # Vectorized clamping
-            x1, x2 = np.clip([x1, x2], 0, w - 1)
-            y1, y2 = np.clip([y1, y2], 0, h - 1)
+        # Vectorized filtering
+        valid_mask = conf_np >= self.confidence_threshold
+        if self.allowed_classes:
+            valid_mask &= np.isin(class_np, list(self.allowed_classes))
 
-            detection = Detection(
-                track_id=int(track_np[i]) if track_np[i] is not None else None,
+        # Early exit if no valid detections
+        if not np.any(valid_mask):
+            return []
+
+        # Apply mask to all arrays at once
+        bbox_np = bbox_np[valid_mask]
+        conf_np = conf_np[valid_mask]
+        class_np = class_np[valid_mask]
+        track_np = track_np[valid_mask]
+
+        # Vectorized coordinate clamping
+        bbox_np[:, [0, 2]] = np.clip(bbox_np[:, [0, 2]], 0, w - 1)
+        bbox_np[:, [1, 3]] = np.clip(bbox_np[:, [1, 3]], 0, h - 1)
+        bbox_int = bbox_np.astype(np.int32)
+
+        # Vectorized center/bottom calculation
+        cx = (bbox_int[:, 0] + bbox_int[:, 2]) // 2
+        cy = (bbox_int[:, 1] + bbox_int[:, 3]) // 2
+        by = bbox_int[:, 3]  # bottom y
+
+        # Build detection objects
+        detections = []
+        for i in range(len(bbox_int)):
+            track_id = int(track_np[i]) if track_np[i] >= 0 else None
+            detections.append(Detection(
+                track_id=track_id,
                 class_id=int(class_np[i]),
                 class_name=self.class_names.get(int(class_np[i]), f"class_{class_np[i]}"),
-                bbox=(x1, y1, x2, y2),
+                bbox=tuple(bbox_int[i]),
                 confidence=float(conf_np[i]),
-                center_point=((x1 + x2) // 2, (y1 + y2) // 2),
-                bottom_point=((x1 + x2) // 2, y2)
-            )
-            detections.append(detection)
+                center_point=(int(cx[i]), int(cy[i])),
+                bottom_point=(int(cx[i]), int(by[i]))
+            ))
 
         return detections
 

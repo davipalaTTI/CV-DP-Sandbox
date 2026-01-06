@@ -9,6 +9,10 @@ Handles the main video processing pipeline including:
 - Performance monitoring and optimization
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import copy
+from folder_monitor import FolderMonitor
+from queue import Queue as ThreadQueue
 import cv2
 from datetime import datetime, timedelta
 import numpy as np
@@ -57,6 +61,368 @@ class ProcessingStats:
             self.fps = self.frames_processed / self.processing_time
 
 
+class VideoWorker:
+    """
+    Isolated worker for processing a single video.
+    Each worker has its own detection engine, counter, and exporter instance
+    to avoid shared state issues during concurrent processing.
+    """
+
+    def __init__(self, config: 'AppConfig', video_path: Path, worker_id: int):
+        self.config = config
+        self.video_path = video_path
+        self.worker_id = worker_id
+        self.logger = logging.getLogger(f"{__name__}.worker_{worker_id}")
+
+        # Each worker gets its own detection engine
+        self.detection_engine = DetectionEngine(
+            config.model_path,
+            config.confidence_threshold,
+            allowed_classes=(config.allowed_classes or None),
+            device=config.device
+        )
+
+        # Each worker gets its own counter
+        frame_size = (config.display_width, config.display_height)
+        self.counter = ObjectCounter(
+            config.lines_config,
+            config.zones_config,
+            frame_size,
+            exclusion_zones=getattr(config, 'exclusion_zones', []),
+            max_track_age=config.max_track_age
+        )
+
+        # Apply speed settings
+        self.counter.configure_speed(
+            enable=bool(getattr(config, "enable_speed", False)),
+            units=str(getattr(config, "speed_units", "pxps")),
+            meters_per_pixel=float(getattr(config, "meters_per_pixel", 0.0) or 0.0),
+            smooth_window=int(getattr(config, "speed_smooth_window", 5) or 5),
+            annotate=bool(getattr(config, "annotate_speed", True))
+        )
+
+        # Each worker gets its own exporter
+        self.exporter = ResultsExporter(config.output_folder)
+
+        # Worker state
+        self.cap = None
+        self.video_writer = None
+        self.stats = ProcessingStats()
+        self.frame_skip = config.frame_skip
+        self.frame_skip_counter = 0
+        self.last_detections = []
+        self.interpolate_tracks = config.interpolate_tracks
+
+        # Video timing
+        self.video_start_time = None
+        self.video_fps = 30.0
+        self.video_frame_number = 0
+        self.video_current_time = None
+        self.is_live_source = False
+
+        # Segment tracking
+        self.current_segment = 0
+        self.segment_events = []
+        self.segment_start_dt = None
+
+        # Heatmap (optional)
+        self.heatmap_acc = None
+
+    def process(self, progress_callback=None) -> Dict:
+        """
+        Process the video file and return results.
+
+        Args:
+            progress_callback: Optional callable(worker_id, frames_done, total_frames, fps, events) 
+                              for progress updates
+
+        Returns:
+            Dictionary with processing results
+        """
+        self.logger.info(f"Worker {self.worker_id} starting: {self.video_path.name}")
+
+        try:
+            # Initialize video capture
+            if not self._initialize_video():
+                return {"error": f"Failed to open video: {self.video_path}", "video_path": str(self.video_path)}
+
+            # Apply exclusion zones
+            if hasattr(self.config, 'exclusion_zones') and self.config.exclusion_zones:
+                ret, first_frame = self.cap.read()
+                if ret:
+                    self.detection_engine.set_exclusion_zones(
+                        self.config.exclusion_zones,
+                        first_frame.shape
+                    )
+                    # Reset to beginning
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+            # Update counter frame size
+            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self.counter.set_frame_size((width, height))
+
+            # Initialize video writer if needed
+            if self.config.save_video:
+                self._initialize_video_writer()
+
+            # Initialize heatmap if enabled
+            if getattr(self.config, "enable_heatmap", False):
+                interval_sec = 3600.0  # 1 hour segments
+                alpha = float(getattr(self.config, "heatmap_alpha", 0.35))
+                cmap_name = getattr(self.config, "heatmap_colormap", "HOT")
+                out_dir = str(Path(self.config.output_folder) / "heatmaps")
+                radius_px = int(getattr(self.config, "heatmap_radius_px", 10))
+                decay = float(getattr(self.config, "heatmap_decay", 0.0))
+                gamma = float(getattr(self.config, "heatmap_gamma", 1.6))
+                
+                # Create output directory
+                Path(out_dir).mkdir(parents=True, exist_ok=True)
+                
+                self.heatmap_acc = HeatmapAccumulator(
+                    frame_size=(height, width),
+                    alpha=alpha,
+                    colormap=resolve_colormap(cmap_name),
+                    out_dir=out_dir,
+                    interval_sec=interval_sec,
+                    radius_px=radius_px,
+                    decay=decay,
+                    gamma=gamma
+                )
+                self.logger.info(f"[HEATMAP] Worker {self.worker_id} initialized ({width}x{height})")
+
+            # Get total frames
+            total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            # Initialize stats
+            self.stats.start_time = time.time()
+            self._reset_segment()
+            
+            # FPS calculation variables
+            fps_update_interval = 30  # Update FPS every N frames
+            fps_frame_times = []
+            last_fps_time = time.time()
+
+            # Process frames
+            while True:
+                frame_start = time.time()
+                
+                ret, frame = self.cap.read()
+                if not ret:
+                    break
+
+                self.video_frame_number += 1
+                self.video_current_time = self._get_current_timestamp()
+
+                # Process frame with skip logic
+                events = self._process_frame(frame)
+
+                # Update stats
+                self.stats.frames_processed += 1
+                self.stats.total_events += len(events)
+                
+                # Track frame time for FPS calculation
+                frame_time = time.time() - frame_start
+                fps_frame_times.append(frame_time)
+                
+                # Keep only recent frame times for rolling FPS
+                if len(fps_frame_times) > fps_update_interval:
+                    fps_frame_times.pop(0)
+
+                # Progress callback with FPS
+                if progress_callback and self.stats.frames_processed % fps_update_interval == 0:
+                    # Calculate current FPS from recent frames
+                    if fps_frame_times:
+                        avg_frame_time = sum(fps_frame_times) / len(fps_frame_times)
+                        current_fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0
+                    else:
+                        current_fps = 0
+                    
+                    progress_callback(
+                        self.worker_id,
+                        self.stats.frames_processed, 
+                        total_frames,
+                        current_fps,
+                        self.stats.total_events
+                    )
+
+            # Finalize
+            self._finalize_segment()
+            self.stats.processing_time = time.time() - self.stats.start_time
+            self.stats.update_fps()
+
+            # Prepare results
+            results = {
+                "video_path": str(self.video_path),
+                "stats": self.stats,
+                "final_counts": self.counter.get_current_counts(),
+                "events_summary": self.counter.get_events_summary(),
+                "worker_id": self.worker_id
+            }
+
+            # Export results
+            try:
+                video_name = self.video_path.stem
+                self.exporter.export_video_summary(results, video_name)
+            except Exception as e:
+                self.logger.error(f"Export failed: {e}")
+
+            self.logger.info(f"Worker {self.worker_id} completed: {self.video_path.name} "
+                             f"({self.stats.frames_processed} frames, {self.stats.fps:.1f} FPS)")
+
+            return results
+
+        except Exception as e:
+            self.logger.error(f"Worker {self.worker_id} error: {e}")
+            return {"error": str(e), "video_path": str(self.video_path)}
+
+        finally:
+            self._cleanup()
+
+    def _initialize_video(self) -> bool:
+        """Initialize video capture"""
+        try:
+            self.cap = cv2.VideoCapture(str(self.video_path))
+            if not self.cap.isOpened():
+                return False
+
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            self.video_fps = fps if fps > 0 else 30.0
+
+            # Get file timestamp
+            if hasattr(os.stat(self.video_path), 'st_birthtime'):
+                file_timestamp = os.stat(self.video_path).st_birthtime
+            else:
+                file_timestamp = os.path.getmtime(self.video_path)
+
+            self.video_start_time = datetime.fromtimestamp(file_timestamp)
+            self.video_current_time = self.video_start_time
+            self.video_frame_number = 0
+
+            return True
+        except Exception as e:
+            self.logger.error(f"Video init failed: {e}")
+            return False
+
+    def _initialize_video_writer(self):
+        """Initialize video writer for output"""
+        try:
+            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = self.video_fps
+
+            output_path = Path(self.config.output_folder) / f"{self.video_path.stem}_output.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            self.video_writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+        except Exception as e:
+            self.logger.warning(f"Video writer init failed: {e}")
+
+    def _get_current_timestamp(self) -> datetime:
+        """Get current video timestamp"""
+        if self.video_start_time and self.video_fps > 0:
+            offset = self.video_frame_number / self.video_fps
+            return self.video_start_time + timedelta(seconds=offset)
+        return datetime.now()
+
+    def _process_frame(self, frame: np.ndarray) -> List:
+        """Process a single frame"""
+        self.frame_skip_counter += 1
+        self.last_frame = frame  # Store for heatmap
+
+        if (self.frame_skip_counter % self.frame_skip) == 0:
+            # Full detection
+            detections = self.detection_engine.detect_and_track(frame)
+            self.last_detections = detections
+            self.stats.total_detections += len(detections)
+
+            # Update counts
+            events = self.counter.update_counts(detections, timestamp=self.video_current_time)
+
+            # Update heatmap if enabled
+            if self.heatmap_acc is not None and detections:
+                boxes_xyxy = [det.bbox for det in detections]
+                self.heatmap_acc.update_from_boxes(boxes_xyxy, weight=1.0)
+
+            # Write video if enabled
+            if self.video_writer:
+                # Draw visualizations
+                vis_frame = self._draw_basic_visualization(frame, detections)
+                self.video_writer.write(vis_frame)
+
+            # Store events for segment
+            self.segment_events.extend(events)
+
+            return events
+        else:
+            # Skip frame, optionally interpolate
+            if self.video_writer and self.last_detections:
+                vis_frame = self._draw_basic_visualization(frame, self.last_detections)
+                self.video_writer.write(vis_frame)
+            return []
+
+    def _draw_basic_visualization(self, frame: np.ndarray, detections: List) -> np.ndarray:
+        """Draw basic bounding boxes and counts on frame"""
+        vis_frame = frame.copy()
+
+        # Draw detections
+        for det in detections:
+            x1, y1, x2, y2 = det.bbox
+            cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            label = f"{det.class_name} #{det.track_id}"
+            cv2.putText(vis_frame, label, (x1, y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        # Draw lines
+        for line in self.counter.lines:
+            cv2.line(vis_frame, line.start_px, line.end_px, (255, 0, 0), 2)
+
+        return vis_frame
+
+    def _reset_segment(self):
+        """Reset segment tracking"""
+        self.segment_events = []
+        self.segment_start_dt = self.video_current_time or datetime.now()
+
+    def _finalize_segment(self):
+        """Finalize and export current segment"""
+        if self.segment_events:
+            try:
+                segment_end_dt = self.video_current_time or datetime.now()
+                self.exporter.export_segment(
+                    self.segment_events,
+                    self.current_segment,
+                    self.segment_start_dt,
+                    segment_end_dt,
+                    source_name=self.video_path.stem
+                )
+            except Exception as e:
+                self.logger.warning(f"Segment export failed: {e}")
+
+    def _cleanup(self):
+        """Release resources"""
+        # Save final heatmap if enabled
+        if self.heatmap_acc is not None:
+            try:
+                last_frame = getattr(self, 'last_frame', None)
+                if last_frame is not None:
+                    end_time = self.video_current_time or datetime.now()
+                    start_time = self.segment_start_dt or self.video_start_time or datetime.now()
+                    out_path = self.heatmap_acc.render_and_save(
+                        frame_bgr=last_frame,
+                        label=self.video_path.stem,
+                        when=end_time.timestamp() if hasattr(end_time, 'timestamp') else time.time(),
+                        suffix="final"
+                    )
+                    self.logger.info(f"[HEATMAP] Final heatmap saved: {out_path}")
+            except Exception as e:
+                self.logger.warning(f"[HEATMAP] Failed to save final heatmap: {e}")
+        
+        if self.cap:
+            self.cap.release()
+        if self.video_writer:
+            self.video_writer.release()
+
+
 class VideoProcessor:
     """Main video processing orchestrator"""
 
@@ -77,30 +443,26 @@ class VideoProcessor:
         self.temp_points = []  # collecting clicks while drawing
         self.tk_root = None  # for dialogs on top
 
+        # Cache frequently accessed config values to avoid repeated getattr calls
+        self._enable_speed = bool(getattr(config, "enable_speed", False))
+        self._speed_units = str(getattr(config, "speed_units", "pxps"))
+        self._annotate_speed = bool(getattr(config, "annotate_speed", True))
+        self._enable_heatmap = bool(getattr(config, "enable_heatmap", False))
+
         # Initialize counter with exclusion zones
         frame_size = (config.display_width, config.display_height)
-        self.counter = ObjectCounter(
-            config.lines_config,
-            config.zones_config,
-            frame_size,
-            exclusion_zones=getattr(config, 'exclusion_zones', []),  # Pass exclusion zones
-            max_track_age=config.max_track_age
-        )
+        self.counter = self._create_configured_counter((config.display_width, config.display_height))
 
-        # NEW: apply speed settings from config (safe with getattr fallbacks)
-        self.counter.configure_speed(
-            enable=bool(getattr(self.config, "enable_speed", False)),
-            units=str(getattr(self.config, "speed_units", "pxps")),
-            meters_per_pixel=float(getattr(self.config, "meters_per_pixel", 0.0) or 0.0),
-            smooth_window=int(getattr(self.config, "speed_smooth_window", 5) or 5),
-            annotate=bool(getattr(self.config, "annotate_speed", True))
-        )
+        # NOTE: configure_speed is already called inside _create_configured_counter
+
+
 
         # Frame skipping
         self.frame_skip = config.frame_skip
         self.interpolate_tracks = config.interpolate_tracks
         self.frame_skip_counter = 0
         self.last_detections = []  # Store last detections for interpolation
+        self._last_mouse_pos = (0, 0)  # Initialize for edit mode drawing
 
         # UI visibility states
         self.show_stats = True  # Stats panel visibility
@@ -211,7 +573,7 @@ class VideoProcessor:
 
             # Define all variables properly
             interval_sec = float(max(1, int(self.segment_split_minutes) * 60))
-            alpha = float(getattr(self.config, "heatmap_alpha", 1 ))
+            alpha = float(getattr(self.config, "heatmap_alpha", 0.35))
             cmap_name = getattr(self.config, "heatmap_colormap", "HOT")
             out_dir = str(Path(self.config.output_folder) / "visualizations")
             radius_px = int(getattr(self.config, "heatmap_radius_px", 10))
@@ -305,6 +667,31 @@ class VideoProcessor:
 
         return self._get_final_results()
 
+    def _create_configured_counter(self, frame_size: Tuple[int, int]) -> ObjectCounter:
+        """Create a properly configured ObjectCounter instance.
+
+        Centralizes counter creation to avoid duplicate code and ensure
+        consistent configuration across all code paths.
+        """
+        counter = ObjectCounter(
+            self.config.lines_config,
+            self.config.zones_config,
+            frame_size,
+            exclusion_zones=getattr(self.config, 'exclusion_zones', []),
+            max_track_age=self.config.max_track_age
+        )
+
+        # Apply speed configuration
+        counter.configure_speed(
+            enable=self._enable_speed,
+            units=self._speed_units,
+            meters_per_pixel=float(getattr(self.config, "meters_per_pixel", 0.0) or 0.0),
+            smooth_window=int(getattr(self.config, "speed_smooth_window", 5) or 5),
+            annotate=self._annotate_speed
+        )
+
+        return counter
+
     def _process_frame_with_skip(self, frame: np.ndarray) -> Tuple[np.ndarray, List[CountingEvent]]:
         """Process frame with skip logic"""
         self.frame_skip_counter += 1
@@ -339,66 +726,210 @@ class VideoProcessor:
 
             return processed_frame, events
 
-    def _process_videos(self) -> Dict:
-        """Process video files from folder or single file"""
-        if self.config.input_type.value == "folder":
-            video_files = list(Path(self.config.input_source).glob("*.mp4"))
-            video_files.extend(Path(self.config.input_source).glob("*.avi"))
-            video_files.extend(Path(self.config.input_source).glob("*.mov"))
-            video_files.extend(Path(self.config.input_source).glob("*.mkv"))
-        else:
-            video_files = [Path(self.config.input_source)]
+    def _process_videos(self, max_workers: int = None) -> Dict:
+        """
+        Process video files from folder with concurrent workers.
 
-        if not video_files:
+        Args:
+            max_workers: Maximum number of videos to process simultaneously.
+                        If None, uses config.max_parallel_videos (default: 1)
+                        Keep this conservative to avoid GPU memory issues.
+        """
+        # Get max_workers from config if not specified
+        if max_workers is None:
+            max_workers = getattr(self.config, 'max_parallel_videos', 1)
+        
+        # Initialize video queue
+        video_queue = ThreadQueue()
+        folder_monitor = None
+
+        # Track active and completed work
+        pending_futures = {}
+        total_results = []
+        video_count = 0
+        worker_id_counter = 0
+        
+        # Thread-safe progress tracking
+        progress_lock = threading.Lock()
+        worker_progress = {}  # worker_id -> {frames, total, fps, events}
+
+        # Determine initial video files
+        if self.config.input_type.value == "folder":
+            folder_path = Path(self.config.input_source)
+
+            # Setup folder monitoring for new videos (this also scans existing files)
+            def on_new_video(video_path: Path):
+                self.logger.info(f"Adding new video to queue: {video_path.name}")
+                video_queue.put(video_path)
+
+            folder_monitor = FolderMonitor(
+                folder_path=str(folder_path),
+                callback=on_new_video,
+                poll_interval=2.0
+            )
+            
+            # Get initial files from the monitor (avoids duplicate scanning)
+            initial_files = folder_monitor.get_known_files()
+            
+            # Add initial files to queue
+            for video_file in initial_files:
+                video_queue.put(video_file)
+            
+            # Start monitoring for NEW files only
+            folder_monitor.start()
+
+            self.logger.info(f"Folder monitoring enabled for: {folder_path}")
+            self.logger.info(f"Starting with {video_queue.qsize()} existing video(s)")
+            self.logger.info(f"Concurrent workers: {max_workers}")
+        else:
+            # Single file mode
+            video_queue.put(Path(self.config.input_source))
+            max_workers = 1  # No need for concurrency with single file
+
+        if video_queue.empty():
             raise RuntimeError("No video files found")
 
-        self.logger.info(f"Processing {len(video_files)} video file(s)")
-
-        total_results = []
-
-        # Create progress window
+        # Create enhanced progress window
         progress = ProgressWindow("Processing Videos")
+        progress.set_total_queued(video_queue.qsize())
+        
+        # Track overall start time
+        overall_start_time = time.time()
 
-        for i, video_path in enumerate(video_files):
-            progress.update_video_progress(i + 1, len(video_files), video_path.name)
-            self.logger.info(f" Processing video {i + 1}/{len(video_files)}: {video_path.name}")
+        # Thread pool for concurrent processing
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        
+        # Progress callback that workers will call
+        def on_worker_progress(worker_id, frames_done, total_frames, fps, events):
+            with progress_lock:
+                worker_progress[worker_id] = {
+                    'frames': frames_done,
+                    'total': total_frames,
+                    'fps': fps,
+                    'events': events
+                }
 
-            # Reset for each video
-            self.counter.reset_all_counts()
+        try:
+            active_workers = 0
 
-            #create new detection engine
-            self.detection_engine = DetectionEngine(
-                self.config.model_path,
-                self.config.confidence_threshold,
-                allowed_classes=(self.config.allowed_classes or None),  # <-- keep your filter
-                device=self.config.device
-            )
+            while True:
+                # Submit new jobs if we have capacity and videos waiting
+                while active_workers < max_workers and not video_queue.empty():
+                    try:
+                        video_path = video_queue.get_nowait()
+                    except:
+                        break
 
-            # ADD THIS: Re-apply exclusion zones to the new detection engine
-            if hasattr(self.config, 'exclusion_zones') and self.config.exclusion_zones:
-                # Get first frame to determine video dimensions
-                temp_cap = cv2.VideoCapture(str(video_path))
-                ret, first_frame = temp_cap.read()
-                if ret:
-                    # Convert exclusion zone configs to the format expected by set_exclusion_zones
-                    self.detection_engine.set_exclusion_zones(
-                        self.config.exclusion_zones,
-                        first_frame.shape
-                    )
-                    self.logger.info(
-                        f"Applied {len(self.config.exclusion_zones)} exclusion zones to detection engine for {video_path.name}")
-                temp_cap.release()
+                    if not video_path.exists():
+                        self.logger.warning(f"Video not found, skipping: {video_path}")
+                        continue
 
-            # Process single video
-            video_results = self._process_single_video(video_path, progress)
-            total_results.append(video_results)
+                    video_count += 1
+                    worker_id_counter += 1
 
-            self.logger.info(f" Completed {video_path.name}")
+                    # Create isolated worker for this video
+                    worker = VideoWorker(self.config, video_path, worker_id_counter)
+                    
+                    # Get total frames for registration
+                    temp_cap = cv2.VideoCapture(str(video_path))
+                    total_frames = int(temp_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    temp_cap.release()
+                    
+                    # Register video with progress window
+                    progress.register_video(worker_id_counter, video_path.name, total_frames)
+                    progress.set_total_queued(video_queue.qsize())
 
-        progress.close()
+                    # Submit to thread pool with progress callback
+                    future = executor.submit(worker.process, on_worker_progress)
+                    pending_futures[future] = {
+                        'video_path': video_path,
+                        'worker_id': worker_id_counter,
+                        'start_time': time.time()
+                    }
+                    active_workers += 1
+
+                    self.logger.info(f"Started worker {worker_id_counter} for: {video_path.name} "
+                                     f"(Active: {active_workers}/{max_workers})")
+
+                # Update progress window from worker progress data
+                with progress_lock:
+                    for wid, data in worker_progress.items():
+                        progress.update_video_progress(
+                            wid, 
+                            data['frames'],
+                            data['fps'],
+                            data['events']
+                        )
+
+                # Check for completed futures
+                done_futures = [f for f in pending_futures if f.done()]
+
+                for future in done_futures:
+                    info = pending_futures.pop(future)
+                    active_workers -= 1
+                    worker_id = info['worker_id']
+
+                    try:
+                        result = future.result(timeout=1.0)
+                        total_results.append(result)
+
+                        elapsed = time.time() - info['start_time']
+                        final_fps = result.get('stats', {})
+                        if hasattr(final_fps, 'fps'):
+                            final_fps = final_fps.fps
+                        else:
+                            final_fps = 0
+                            
+                        self.logger.info(f"Worker {worker_id} finished: {info['video_path'].name} "
+                                         f"in {elapsed:.1f}s ({final_fps:.1f} avg FPS)")
+                        
+                        # Mark as complete in progress window
+                        progress.complete_video(worker_id, success=True)
+
+                    except Exception as e:
+                        self.logger.error(f"Worker {worker_id} failed: {e}")
+                        total_results.append({
+                            "error": str(e),
+                            "video_path": str(info['video_path'])
+                        })
+                        progress.complete_video(worker_id, success=False)
+                    
+                    # Clean up worker progress tracking
+                    with progress_lock:
+                        worker_progress.pop(worker_id, None)
+
+                # Update queue count and elapsed time
+                progress.set_total_queued(video_queue.qsize())
+                progress.update_elapsed_time(time.time() - overall_start_time)
+
+                # Check if we're done
+                if active_workers == 0 and video_queue.empty():
+                    if self.config.input_type.value == "folder":
+                        # Wait briefly for new files
+                        self.logger.info("All current videos processed, waiting for new files...")
+                        time.sleep(5)
+
+                        if video_queue.empty():
+                            self.logger.info("No new videos. Processing complete.")
+                            break
+                    else:
+                        break
+
+                # Small sleep to prevent busy-waiting
+                time.sleep(0.1)
+
+        except KeyboardInterrupt:
+            self.logger.info("Processing interrupted by user")
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        finally:
+            if folder_monitor:
+                folder_monitor.stop()
+            executor.shutdown(wait=True)
+            progress.close()
 
         return {
-            "total_videos": len(video_files),
+            "total_videos": len(total_results),
             "video_results": total_results,
             "combined_stats": self._combine_video_stats(total_results)
         }
@@ -470,6 +1001,10 @@ class VideoProcessor:
 
     def _process_single_video(self, video_path: Path, progress: Optional[ProgressWindow] = None) -> Dict:
         """Process a single video file"""
+
+        # Store current video path for exports
+        self.current_video_path = video_path
+
         # Initialize video capture
         if not self._initialize_video_capture(str(video_path)):
             raise RuntimeError(f"Failed to open video: {video_path}")
@@ -484,7 +1019,7 @@ class VideoProcessor:
 
             # Define all variables properly
             interval_sec = float(max(1, int(self.segment_split_minutes) * 60))
-            alpha = float(getattr(self.config, "heatmap_alpha", 1))
+            alpha = float(getattr(self.config, "heatmap_alpha", 0.35))
             cmap_name = getattr(self.config, "heatmap_colormap", "HOT")
             out_dir = str(Path(self.config.output_folder) / "visualizations")
             radius_px = int(getattr(self.config, "heatmap_radius_px", 10))
@@ -700,12 +1235,7 @@ class VideoProcessor:
                     return
 
             # Only create new counter if we don't have one or can't update
-            self.counter = ObjectCounter(
-                self.config.lines_config,
-                self.config.zones_config,
-                (width, height),
-                max_track_age=self.config.max_track_age
-            )
+            self.counter = self._create_configured_counter((width, height))
 
             # Reapply speed settings after creating new counter
             self.counter.configure_speed(
@@ -1565,14 +2095,27 @@ class VideoProcessor:
                 zone.update_point(extra, (x, y))     # uses the new helper
 
     def _should_rollover_segment(self) -> bool:
-        """Check if we've reached the next hour boundary based on VIDEO TIME"""
+        """
+        Rollover Segment Check
+        - Camera: Rotate daily at midnight
+        - Video file: Rotate based on original segment logic (e.g. hourly)
+        """
         # Get current time (video time for recordings, real time for live)
         if self.is_live_source:
             now_dt = datetime.now()
         else:
             now_dt = self._get_current_timestamp()  # Uses video time
 
-        # Initialize next boundary if needed
+        # Safety check
+        if self.current_segment_start_dt is None:
+            self.current_segment_start_dt = now_dt
+            return False
+
+        # --- Live source 24 hour rollover ---
+        if self.config.is_camera:
+            return now_dt.day != self.current_segment_start_dt.day
+
+        # Initialize next boundary if needed (e.g. hourly)
         if self.next_split_dt is None:
             self.next_split_dt = self._compute_next_clock_boundary(now_dt)
 
@@ -1586,7 +2129,12 @@ class VideoProcessor:
 
         # Determine time window
         window_start = self.current_segment_start_dt
-        window_end = self.next_split_dt
+
+        if self.config.is_camera:
+            # For daily camera, the 'end' is the next midnight
+            window_end = datetime.datetime.now()
+        else:
+            window_end = self.next_split_dt
 
         # For display/logging
         hour_str = window_start.strftime("%H:00") if window_start else "00:00"
@@ -1604,7 +2152,8 @@ class VideoProcessor:
         self.current_segment_start_dt = window_end
 
         # Set next hour boundary
-        self.next_split_dt = self._compute_next_clock_boundary(window_end)
+        self.next_split_dt = self._compute_next_clock_boundary(window_end, 60)
+
 
         # Rotate video file if saving
         if self.config.save_video:
@@ -1629,11 +2178,17 @@ class VideoProcessor:
             # Export using existing exporter
             segment_id = f"hour_{window_start.hour:02d}"
 
+            # Get current video name if available
+            video_name = None
+            if hasattr(self, 'current_video_path'):
+                video_name = self.current_video_path.name
+
             self.exporter.export_segment_results(
                 segment_id=segment_id,
                 counts=counts_dict,
                 events=events_dict,
-                stats=enhanced_stats
+                stats=enhanced_stats,
+                video_source=video_name
             )
 
             self.logger.info(f"Exported hour {window_start.hour:02d}:00 data")
