@@ -12,7 +12,7 @@ import json
 import csv
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Union
 from dataclasses import dataclass
 import logging
 import datetime
@@ -68,7 +68,7 @@ class ResultsExporter:
             df.to_excel(self.master_log_path, sheet_name='Events', index=False, engine='openpyxl')
             self.logger.info(f"Created master event log: {self.master_log_path}")
 
-    def _append_to_master_log(self, event_list: List[Dict], video_source: str = None, segment_id: int = None):
+    def _append_to_master_log(self, event_list: List[Dict], video_source: str = None, segment_id: Union[int, str] = None):
         """
         Append events to the master event log Excel file
 
@@ -151,7 +151,7 @@ class ResultsExporter:
         except (ValueError, TypeError):
             return None
 
-    def export_segment(self, events_list: List, segment_id: int, 
+    def export_segment(self, events_list: List, segment_id: Union[int, str],
                        start_dt: datetime.datetime, end_dt: datetime.datetime,
                        source_name: str = None) -> Dict[str, str]:
         """
@@ -280,7 +280,7 @@ class ResultsExporter:
             self.logger.error(f"Failed to export video summary: {e}")
             return {}
 
-    def export_segment_results(self, segment_id: int, counts: Dict, events: Dict, stats: Any,
+    def export_segment_results(self, segment_id: Union[int, str], counts: Dict, events: Dict, stats: Any,
                               video_source: str = None) -> Dict[str, str]:
         """
         Export event log for a single hourly segment

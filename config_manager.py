@@ -123,6 +123,13 @@ class AppConfig:
     # Parallel processing settings
     max_parallel_videos: int = 1  # Number of videos to process simultaneously (1-4 recommended)
 
+    # Live recording / growing file settings
+    wait_for_growing_files: bool = True  # Wait for files that are still being recorded
+    growing_file_check_interval: float = 2.0  # Seconds between file size checks
+    growing_file_timeout: float = 30.0  # Seconds to wait for file to grow before considering it complete
+    folder_idle_timeout: float = 0.0  # Seconds to wait for new files before exiting (0 = wait forever)
+    pre_process_stability_seconds: float = 10.0  # Seconds file must be stable before starting processing
+
 
 class ConfigManager:
     """Manages application configuration"""

@@ -4,23 +4,26 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="Create">
-      <change beforePath="$PROJECT_DIR$/.idea/material_theme_project_new.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/material_theme_project_new.xml" afterDir="false" />
+    <list default="true" id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="Trase Updated Files&#10;1 5 2026 TH">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/config_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/config_manager.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/counter_logic.py" beforeDir="false" afterPath="$PROJECT_DIR$/counter_logic.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/detection_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/detection_engine.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/gui_setup.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui_setup.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/progress_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/progress_window.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/results_export.py" beforeDir="false" afterPath="$PROJECT_DIR$/results_export.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/video_processor.py" beforeDir="false" afterPath="$PROJECT_DIR$/video_processor.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
   </component>
   <component name="Git.Settings">
     <branch-grouping />
@@ -152,7 +155,15 @@
       <option name="project" value="LOCAL" />
       <updated>1767649907926</updated>
     </task>
-    <option name="localTasksCounter" value="6" />
+    <task id="LOCAL-00006" summary="Trase Updated Files&#10;1 5 2026 TH">
+      <option name="closed" value="true" />
+      <created>1767720371787</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1767720371787</updated>
+    </task>
+    <option name="localTasksCounter" value="7" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -168,7 +179,8 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Create" />
-    <option name="LAST_COMMIT_MESSAGE" value="Create" />
+    <MESSAGE value="Trase Updated Files&#10;1 5 2026 TH" />
+    <option name="LAST_COMMIT_MESSAGE" value="Trase Updated Files&#10;1 5 2026 TH" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>

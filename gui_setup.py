@@ -92,6 +92,12 @@ class InteractiveGUI:
                 "color": (0, 0, 255),
                 "text_color": (255, 255, 255)
             },
+            "finish_zone": {
+                "rect": (410, 10, 500, 50),
+                "text": "Finish Zone",
+                "color": (255, 165, 0),
+                "text_color": (255, 255, 255)
+            },
             "confirm": {
                 "rect": (210, 10, 300, 50),
                 "text": "Confirm",
@@ -113,12 +119,6 @@ class InteractiveGUI:
                     "text": "Zone",
                     "color": (255, 255, 0),
                     "text_color": (0, 0, 0)
-                },
-                "finish_zone": {
-                    "rect": (410, 10, 500, 50),
-                    "text": "Finish Zone",
-                    "color": (255, 165, 0),
-                    "text_color": (255, 255, 255)
                 }
             })
 
@@ -277,7 +277,7 @@ class InteractiveGUI:
             self.state.current_line.clear()
             self.state.current_zone.clear()
 
-        elif button_name == "finish_zone" and self.config.enable_zones:
+        elif button_name == "finish_zone" and self.config.enable_zones or button_name == "finish_zone" and self.state.selection_mode == "exclusion":
             self._finish_current_zone()
 
         elif button_name == "confirm":

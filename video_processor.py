@@ -132,14 +132,22 @@ class VideoWorker:
         """
         Process the video file and return results.
 
+        Handles both complete files and files that are still being recorded.
+        For growing files, will wait for more data when reaching EOF.
+
         Args:
-            progress_callback: Optional callable(worker_id, frames_done, total_frames, fps, events) 
+            progress_callback: Optional callable(worker_id, frames_done, total_frames, fps, events)
                               for progress updates
 
         Returns:
             Dictionary with processing results
         """
         self.logger.info(f"Worker {self.worker_id} starting: {self.video_path.name}")
+
+        # Configuration for growing file handling
+        wait_for_growing = getattr(self.config, 'wait_for_growing_files', True)
+        check_interval = getattr(self.config, 'growing_file_check_interval', 2.0)
+        stable_timeout = getattr(self.config, 'growing_file_timeout', 30.0)
 
         try:
             # Initialize video capture
@@ -175,10 +183,10 @@ class VideoWorker:
                 radius_px = int(getattr(self.config, "heatmap_radius_px", 10))
                 decay = float(getattr(self.config, "heatmap_decay", 0.0))
                 gamma = float(getattr(self.config, "heatmap_gamma", 1.6))
-                
+
                 # Create output directory
                 Path(out_dir).mkdir(parents=True, exist_ok=True)
-                
+
                 self.heatmap_acc = HeatmapAccumulator(
                     frame_size=(height, width),
                     alpha=alpha,
@@ -191,25 +199,98 @@ class VideoWorker:
                 )
                 self.logger.info(f"[HEATMAP] Worker {self.worker_id} initialized ({width}x{height})")
 
-            # Get total frames
+            # Get total frames (may be inaccurate for growing files)
             total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
             # Initialize stats
             self.stats.start_time = time.time()
             self._reset_segment()
-            
+
             # FPS calculation variables
             fps_update_interval = 30  # Update FPS every N frames
             fps_frame_times = []
             last_fps_time = time.time()
 
+            # Growing file tracking
+            consecutive_empty_reads = 0
+            last_file_size = self.video_path.stat().st_size if self.video_path.exists() else 0
+            file_stable_start = None
+
             # Process frames
             while True:
                 frame_start = time.time()
-                
+
                 ret, frame = self.cap.read()
+
                 if not ret:
-                    break
+                    # End of currently available frames
+                    if not wait_for_growing:
+                        # Not configured to wait, exit immediately
+                        break
+
+                    # Check if file is still growing
+                    if not self.video_path.exists():
+                        self.logger.warning(f"Video file no longer exists: {self.video_path.name}")
+                        break
+
+                    current_file_size = self.video_path.stat().st_size
+
+                    if current_file_size > last_file_size:
+                        # File is still growing, wait and retry
+                        self.logger.debug(f"File growing ({last_file_size} -> {current_file_size}), waiting for more data...")
+                        last_file_size = current_file_size
+                        file_stable_start = None
+                        consecutive_empty_reads = 0
+
+                        # Wait and then try to seek/reopen to get new frames
+                        time.sleep(check_interval)
+
+                        # Try to read more frames by reopening or seeking
+                        current_pos = self.video_frame_number
+                        self.cap.release()
+                        self.cap = cv2.VideoCapture(str(self.video_path))
+                        if self.cap.isOpened():
+                            # Seek back to where we were
+                            self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                            # Update total frame count
+                            new_total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                            if new_total > total_frames:
+                                total_frames = new_total
+                                self.logger.info(f"New frames available: {total_frames} total")
+                        continue
+                    else:
+                        # File size unchanged
+                        if file_stable_start is None:
+                            file_stable_start = time.time()
+
+                        stable_duration = time.time() - file_stable_start
+
+                        if stable_duration >= stable_timeout:
+                            # File has been stable long enough, consider it complete
+                            self.logger.info(f"File stable for {stable_timeout}s, processing complete: {self.video_path.name}")
+                            break
+                        else:
+                            # Still waiting for stability confirmation
+                            self.logger.debug(f"File stable for {stable_duration:.1f}s/{stable_timeout}s, waiting...")
+                            time.sleep(check_interval)
+
+                            # Try reopening to check for new frames
+                            current_pos = self.video_frame_number
+                            self.cap.release()
+                            self.cap = cv2.VideoCapture(str(self.video_path))
+                            if self.cap.isOpened():
+                                self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                                new_total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                                if new_total > total_frames:
+                                    total_frames = new_total
+                                    file_stable_start = None  # Reset since new frames appeared
+                            continue
+
+                # Successfully read a frame - reset growing file tracking
+                consecutive_empty_reads = 0
+                file_stable_start = None
+                if self.video_path.exists():
+                    last_file_size = self.video_path.stat().st_size
 
                 self.video_frame_number += 1
                 self.video_current_time = self._get_current_timestamp()
@@ -220,11 +301,11 @@ class VideoWorker:
                 # Update stats
                 self.stats.frames_processed += 1
                 self.stats.total_events += len(events)
-                
+
                 # Track frame time for FPS calculation
                 frame_time = time.time() - frame_start
                 fps_frame_times.append(frame_time)
-                
+
                 # Keep only recent frame times for rolling FPS
                 if len(fps_frame_times) > fps_update_interval:
                     fps_frame_times.pop(0)
@@ -237,10 +318,10 @@ class VideoWorker:
                         current_fps = 1.0 / avg_frame_time if avg_frame_time > 0 else 0
                     else:
                         current_fps = 0
-                    
+
                     progress_callback(
                         self.worker_id,
-                        self.stats.frames_processed, 
+                        self.stats.frames_processed,
                         total_frames,
                         current_fps,
                         self.stats.total_events
@@ -373,8 +454,8 @@ class VideoWorker:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
         # Draw lines
-        for line in self.counter.lines:
-            cv2.line(vis_frame, line.start_px, line.end_px, (255, 0, 0), 2)
+        for name, line_counter in self.counter.line_counters.items():
+            cv2.line(vis_frame, line_counter.start_px, line_counter.end_px, (255, 0, 0), 2)
 
         return vis_frame
 
@@ -416,7 +497,7 @@ class VideoWorker:
                     self.logger.info(f"[HEATMAP] Final heatmap saved: {out_path}")
             except Exception as e:
                 self.logger.warning(f"[HEATMAP] Failed to save final heatmap: {e}")
-        
+
         if self.cap:
             self.cap.release()
         if self.video_writer:
@@ -524,6 +605,11 @@ class VideoProcessor:
 
         # Statistics
         self.stats = ProcessingStats()
+
+        self.live_export_interval = 15.0  # Update Excel every 15 seconds
+        self.last_live_export_time = time.time()
+        self.last_exported_event_count = 0
+        self.export_lock = threading.Lock()
 
         # Threading
         self.processing_thread = None
@@ -648,6 +734,7 @@ class VideoProcessor:
                 if self._should_rollover_segment():
                     self._rollover_segment()
 
+                self._trigger_live_export(force=False)
 
                 # Display frame with controls
                 display_frame = self._add_live_controls(processed_frame)
@@ -738,7 +825,7 @@ class VideoProcessor:
         # Get max_workers from config if not specified
         if max_workers is None:
             max_workers = getattr(self.config, 'max_parallel_videos', 1)
-        
+
         # Initialize video queue
         video_queue = ThreadQueue()
         folder_monitor = None
@@ -748,7 +835,7 @@ class VideoProcessor:
         total_results = []
         video_count = 0
         worker_id_counter = 0
-        
+
         # Thread-safe progress tracking
         progress_lock = threading.Lock()
         worker_progress = {}  # worker_id -> {frames, total, fps, events}
@@ -767,14 +854,14 @@ class VideoProcessor:
                 callback=on_new_video,
                 poll_interval=2.0
             )
-            
+
             # Get initial files from the monitor (avoids duplicate scanning)
             initial_files = folder_monitor.get_known_files()
-            
+
             # Add initial files to queue
             for video_file in initial_files:
                 video_queue.put(video_file)
-            
+
             # Start monitoring for NEW files only
             folder_monitor.start()
 
@@ -792,13 +879,13 @@ class VideoProcessor:
         # Create enhanced progress window
         progress = ProgressWindow("Processing Videos")
         progress.set_total_queued(video_queue.qsize())
-        
+
         # Track overall start time
         overall_start_time = time.time()
 
         # Thread pool for concurrent processing
         executor = ThreadPoolExecutor(max_workers=max_workers)
-        
+
         # Progress callback that workers will call
         def on_worker_progress(worker_id, frames_done, total_frames, fps, events):
             with progress_lock:
@@ -809,11 +896,104 @@ class VideoProcessor:
                     'events': events
                 }
 
+        # Get pre-processing stability setting
+        pre_process_stability = getattr(self.config, 'pre_process_stability_seconds', 10.0)
+        stability_check_interval = 120.0  # Check pending files every 120 seconds
+
+        # Track files waiting for stability: {path: {'last_size': int, 'stable_since': float, 'first_seen': float}}
+        pending_stability = {}
+        last_stability_check = 0
+
+        # Track files that have been verified stable (so we don't re-check them)
+        verified_stable = set()
+
+        # Track files that disappeared during checks for retry: {path: retry_count}
+        disappeared_files = {}
+        last_disappeared_requeue = 0
+        disappeared_requeue_interval = 60.0  # Re-queue disappeared files every 60 seconds
+
         try:
             active_workers = 0
 
             while True:
-                # Submit new jobs if we have capacity and videos waiting
+                current_time = time.time()
+
+                # === Re-queue disappeared files that might have reappeared ===
+                if disappeared_files and (current_time - last_disappeared_requeue) >= disappeared_requeue_interval:
+                    last_disappeared_requeue = current_time
+                    reappeared = []
+
+                    for video_path, retry_count in list(disappeared_files.items()):
+                        if video_path.exists():
+                            self.logger.info(f"Previously missing file has reappeared, re-queuing: {video_path.name}")
+                            reappeared.append(video_path)
+                            video_queue.put(video_path)
+
+                    for video_path in reappeared:
+                        disappeared_files.pop(video_path, None)
+
+                # === Non-blocking stability check for pending files ===
+                if pending_stability and (current_time - last_stability_check) >= stability_check_interval:
+                    last_stability_check = current_time
+                    newly_stable = []
+                    still_pending = []
+
+                    for video_path, info in list(pending_stability.items()):
+                        if not video_path.exists():
+                            self.logger.warning(f"File disappeared while waiting for stability: {video_path.name}")
+                            del pending_stability[video_path]
+                            continue
+
+                        current_size = video_path.stat().st_size
+
+                        if current_size > info['last_size']:
+                            # File still growing, update tracking and reset stable_since
+                            self.logger.debug(f"File still growing: {video_path.name} ({info['last_size']} -> {current_size})")
+                            pending_stability[video_path] = {
+                                'last_size': current_size,
+                                'stable_since': current_time,
+                                'first_seen': info['first_seen']
+                            }
+                        else:
+                            # File size unchanged since last check, but we need to verify
+                            # it's truly stable by doing a brief wait and recheck
+                            self.logger.debug(f"File size unchanged, verifying stability: {video_path.name}")
+                            still_pending.append((video_path, info, current_size))
+
+                    # Do verification checks for files that appeared stable
+                    # This is done sequentially but only for files that passed the first check
+                    for video_path, info, size_before in still_pending:
+                        time.sleep(8.0)  # Wait 8 seconds to verify
+
+                        if not video_path.exists():
+                            self.logger.warning(f"File disappeared during verification: {video_path.name}")
+                            if video_path in pending_stability:
+                                del pending_stability[video_path]
+                            continue
+
+                        size_after = video_path.stat().st_size
+
+                        if size_after > size_before:
+                            # Still growing, update tracking
+                            self.logger.info(f"File still being recorded (verification failed): {video_path.name}")
+                            pending_stability[video_path] = {
+                                'last_size': size_after,
+                                'stable_since': time.time(),
+                                'first_seen': info['first_seen']
+                            }
+                        else:
+                            # Truly stable - passed the 8-second verification
+                            self.logger.info(f"File verified stable, ready to process: {video_path.name}")
+                            newly_stable.append(video_path)
+
+                    # Move verified stable files back to the queue
+                    for video_path in newly_stable:
+                        if video_path in pending_stability:
+                            del pending_stability[video_path]
+                        verified_stable.add(video_path)  # Mark as verified
+                        video_queue.put(video_path)
+
+                # === Submit new jobs if we have capacity and videos waiting ===
                 while active_workers < max_workers and not video_queue.empty():
                     try:
                         video_path = video_queue.get_nowait()
@@ -822,22 +1002,82 @@ class VideoProcessor:
 
                     if not video_path.exists():
                         self.logger.warning(f"Video not found, skipping: {video_path}")
+                        verified_stable.discard(video_path)  # Clean up if it was verified
                         continue
+
+                    # Skip stability check if file was already verified by periodic check
+                    if video_path in verified_stable:
+                        self.logger.debug(f"File already verified stable, processing: {video_path.name}")
+                        verified_stable.discard(video_path)  # Remove from set, one-time use
+                        # Fall through to processing
+
+                    # Pre-processing stability check (non-blocking)
+                    elif pre_process_stability > 0:
+                        current_size = video_path.stat().st_size
+
+                        # Quick check: compare with previous size if we've seen this file before
+                        if video_path in pending_stability:
+                            # This shouldn't happen normally, but handle it
+                            info = pending_stability[video_path]
+                            if current_size > info['last_size']:
+                                # Still growing
+                                pending_stability[video_path]['last_size'] = current_size
+                                pending_stability[video_path]['stable_since'] = current_time
+                                continue
+                            elif (current_time - info['stable_since']) < pre_process_stability:
+                                # Not stable long enough yet
+                                continue
+                            else:
+                                # Now stable, remove from pending
+                                del pending_stability[video_path]
+                        else:
+                            # First time seeing this file, do a quick initial stability check
+                            # Sleep briefly to get an initial size comparison
+                            initial_size = current_size
+                            time.sleep(8.0)  # Brief 8-second check
+
+                            if not video_path.exists():
+                                # File disappeared - could be temporary, add to retry queue
+                                retry_count = disappeared_files.get(video_path, 0)
+                                if retry_count < 3:  # Retry up to 3 times
+                                    self.logger.warning(f"File not found during initial check, will retry later ({retry_count + 1}/3): {video_path.name}")
+                                    disappeared_files[video_path] = retry_count + 1
+                                else:
+                                    self.logger.error(f"File repeatedly not found, giving up: {video_path.name}")
+                                    disappeared_files.pop(video_path, None)
+                                continue
+
+                            # File exists, clear any retry tracking
+                            disappeared_files.pop(video_path, None)
+
+                            current_size = video_path.stat().st_size
+
+                            if current_size > initial_size:
+                                # File is actively growing, add to pending stability tracking
+                                self.logger.info(f"File is being recorded, will check again later: {video_path.name}")
+                                pending_stability[video_path] = {
+                                    'last_size': current_size,
+                                    'stable_since': current_time,
+                                    'first_seen': current_time
+                                }
+                                last_stability_check = current_time  # Reset check timer
+                                continue
+                            # else: File appears stable, proceed to process
 
                     video_count += 1
                     worker_id_counter += 1
 
                     # Create isolated worker for this video
                     worker = VideoWorker(self.config, video_path, worker_id_counter)
-                    
+
                     # Get total frames for registration
                     temp_cap = cv2.VideoCapture(str(video_path))
                     total_frames = int(temp_cap.get(cv2.CAP_PROP_FRAME_COUNT))
                     temp_cap.release()
-                    
+
                     # Register video with progress window
                     progress.register_video(worker_id_counter, video_path.name, total_frames)
-                    progress.set_total_queued(video_queue.qsize())
+                    progress.set_total_queued(video_queue.qsize() + len(pending_stability))
 
                     # Submit to thread pool with progress callback
                     future = executor.submit(worker.process, on_worker_progress)
@@ -855,7 +1095,7 @@ class VideoProcessor:
                 with progress_lock:
                     for wid, data in worker_progress.items():
                         progress.update_video_progress(
-                            wid, 
+                            wid,
                             data['frames'],
                             data['fps'],
                             data['events']
@@ -879,10 +1119,10 @@ class VideoProcessor:
                             final_fps = final_fps.fps
                         else:
                             final_fps = 0
-                            
+
                         self.logger.info(f"Worker {worker_id} finished: {info['video_path'].name} "
                                          f"in {elapsed:.1f}s ({final_fps:.1f} avg FPS)")
-                        
+
                         # Mark as complete in progress window
                         progress.complete_video(worker_id, success=True)
 
@@ -893,27 +1133,80 @@ class VideoProcessor:
                             "video_path": str(info['video_path'])
                         })
                         progress.complete_video(worker_id, success=False)
-                    
+
                     # Clean up worker progress tracking
                     with progress_lock:
                         worker_progress.pop(worker_id, None)
 
-                # Update queue count and elapsed time
-                progress.set_total_queued(video_queue.qsize())
+                # Update queue count and elapsed time (include pending stability files)
+                progress.set_total_queued(video_queue.qsize() + len(pending_stability))
                 progress.update_elapsed_time(time.time() - overall_start_time)
 
-                # Check if we're done
-                if active_workers == 0 and video_queue.empty():
-                    if self.config.input_type.value == "folder":
-                        # Wait briefly for new files
-                        self.logger.info("All current videos processed, waiting for new files...")
-                        time.sleep(5)
+                # Update status if there are pending stability files
+                if pending_stability and active_workers > 0:
+                    pending_names = [p.name for p in list(pending_stability.keys())[:2]]
+                    if len(pending_stability) > 2:
+                        pending_names.append(f"...+{len(pending_stability)-2} more")
+                    # Don't override status, just log occasionally
+                    pass
 
-                        if video_queue.empty():
-                            self.logger.info("No new videos. Processing complete.")
-                            break
+                # Check if we're done (also check pending_stability is empty)
+                if active_workers == 0 and video_queue.empty() and not pending_stability:
+                    if self.config.input_type.value == "folder":
+                        # Get configurable idle timeout (0 = wait forever)
+                        idle_timeout = getattr(self.config, 'folder_idle_timeout', 600.0)
+
+                        if idle_timeout <= 0:
+                            # Wait forever mode - just keep waiting for new files
+                            self.logger.info("All current videos processed, waiting indefinitely for new files...")
+                            while video_queue.empty() and not pending_stability and not self.stop_requested:
+                                progress.set_status("Waiting for new videos...")
+                                time.sleep(5.0)
+                                progress.update_elapsed_time(time.time() - overall_start_time)
+
+                            if self.stop_requested:
+                                self.logger.info("Stop requested, exiting...")
+                                break
+                            # New video appeared, continue processing
+                            continue
+                        else:
+                            # Wait with timeout
+                            self.logger.info(f"All current videos processed, waiting up to {idle_timeout}s for new files...")
+                            wait_start = time.time()
+
+                            while video_queue.empty() and not pending_stability and (time.time() - wait_start) < idle_timeout:
+                                remaining = idle_timeout - (time.time() - wait_start)
+                                progress.set_status(f"Waiting for new videos ({remaining:.0f}s remaining)...")
+                                time.sleep(min(5.0, remaining))
+                                progress.update_elapsed_time(time.time() - overall_start_time)
+
+                                if self.stop_requested:
+                                    break
+
+                            if self.stop_requested:
+                                self.logger.info("Stop requested, exiting...")
+                                break
+
+                            if video_queue.empty() and not pending_stability:
+                                self.logger.info(f"No new videos after {idle_timeout}s. Processing complete.")
+                                break
+                            # New video appeared or pending file became ready, continue processing
+                            continue
                     else:
                         break
+
+                # If we have pending stability files but no active workers and empty queue,
+                # just wait - the periodic check will handle it at the 180-second interval
+                elif active_workers == 0 and video_queue.empty() and pending_stability:
+                    time_since_last_check = current_time - last_stability_check
+                    time_until_next_check = stability_check_interval - time_since_last_check
+
+                    if time_until_next_check > 0:
+                        pending_names = [p.name for p in list(pending_stability.keys())[:2]]
+                        progress.set_status(f"Waiting for recording to finish: {', '.join(pending_names)} (next check in {time_until_next_check:.0f}s)")
+                        # Sleep for a bit but not too long so we can respond to new files
+                        time.sleep(min(5.0, time_until_next_check))
+                        continue
 
                 # Small sleep to prevent busy-waiting
                 time.sleep(0.1)
@@ -1101,7 +1394,7 @@ class VideoProcessor:
             "final_counts": self.counter.get_current_counts(),
             "events_summary": self.counter.get_events_summary()
         }
-        
+
         # Export individual video results
         try:
             video_name = video_path.stem
@@ -1109,7 +1402,7 @@ class VideoProcessor:
             self.logger.info(f"Exported results for {video_name}")
         except Exception as e:
             self.logger.error(f"Failed to export results for {video_name}: {e}")
-        
+
         return video_results
 
     def _initialize_camera(self) -> bool:
@@ -1297,10 +1590,21 @@ class VideoProcessor:
             fps = float(fps_raw) if fps_raw and fps_raw > 0 else 30.0
 
             # ----- Resolve output path -----
-            out_dir = Path(self.config.output_folder)
+            now = datetime.now()
+
+            # Create nested directory structure: output/YYYY-MM/YYYY-MM-DD/
+
+            out_dir = Path(self.config.output_folder) / "live_footage"
             out_dir.mkdir(parents=True, exist_ok=True)
+
             if filename is None:
-                filename = f"live_segment_{self.current_segment}.mp4"
+                if getattr(self.config, 'is_camera', False):
+                    date_str = now.strftime("%Y-%m-%d")
+                    hour_str = now.strftime("%H")
+                    filename = f"live_{date_str}_{hour_str}.mp4"
+                else:
+                    filename = f"live_segment_{self.current_segment}.mp4"
+
             path = out_dir / filename
 
             # Helper: open with a specific backend and fourcc
@@ -2104,64 +2408,42 @@ class VideoProcessor:
         if self.is_live_source:
             now_dt = datetime.now()
         else:
-            now_dt = self._get_current_timestamp()  # Uses video time
+            now_dt = self._get_current_timestamp()
 
-        # Safety check
         if self.current_segment_start_dt is None:
             self.current_segment_start_dt = now_dt
             return False
 
-        # --- Live source 24 hour rollover ---
-        if self.config.is_camera:
-            return now_dt.day != self.current_segment_start_dt.day
-
-        # Initialize next boundary if needed (e.g. hourly)
+            # Use the standard clock boundary (60 minutes) for both camera and files
         if self.next_split_dt is None:
-            self.next_split_dt = self._compute_next_clock_boundary(now_dt)
+            self.next_split_dt = self._compute_next_clock_boundary(now_dt, 60)
 
-        # Check if we've reached the hour boundary
         return now_dt >= self.next_split_dt
 
     def _rollover_segment(self) -> None:
-        """Rollover to next hourly segment"""
-        # Update events with final stats
+        """Handle hourly rollover and export."""
         self.counter.update_events_with_final_stats()
-
-        # Determine time window
         window_start = self.current_segment_start_dt
+        window_end = self.next_split_dt if self.next_split_dt else datetime.now()
 
-        if self.config.is_camera:
-            # For daily camera, the 'end' is the next midnight
-            window_end = datetime.datetime.now()
-        else:
-            window_end = self.next_split_dt
+        self.logger.info(f"Hourly segment complete: {window_start.strftime('%H:%M')} - {window_end.strftime('%H:%M')}")
 
-        # For display/logging
-        hour_str = window_start.strftime("%H:00") if window_start else "00:00"
-        next_hour_str = window_end.strftime("%H:00") if window_end else "01:00"
-
-        self.logger.info(f"Hour segment complete: {hour_str} - {next_hour_str}")
-
-        # Export hourly data
+        # This will now save segments into the nested folders if you update exporter paths as well
         self._export_hourly_segment(window_start, window_end)
 
-        # Reset for next hour
         self.current_segment += 1
         self.counter.reset_all_counts()
-        self.segment_start_time = time.time()
         self.current_segment_start_dt = window_end
-
-        # Set next hour boundary
         self.next_split_dt = self._compute_next_clock_boundary(window_end, 60)
 
-
-        # Rotate video file if saving
         if self.config.save_video:
             self._rotate_hourly_video(window_start, window_end)
 
     def _export_hourly_segment(self, window_start: datetime, window_end: datetime):
         """Export data for the completed hour"""
         try:
+            self._trigger_live_export(force=True)
+
             counts_dict = self.counter.get_current_counts()
             events_dict = self.counter.get_events_summary()
 
@@ -2183,13 +2465,19 @@ class VideoProcessor:
             if hasattr(self, 'current_video_path'):
                 video_name = self.current_video_path.name
 
-            self.exporter.export_segment_results(
-                segment_id=segment_id,
-                counts=counts_dict,
-                events=events_dict,
-                stats=enhanced_stats,
-                video_source=video_name
-            )
+            original_master_setting = self.exporter.config.enable_master_log
+            self.exporter.config.enable_master_log = False
+
+            try:
+                self.exporter.export_segment_results(
+                    segment_id=segment_id,
+                    counts=counts_dict,
+                    events=events_dict,
+                    stats=enhanced_stats,
+                    video_source=video_name
+                )
+            finally:
+                self.exporter.config.enable_master_log = original_master_setting
 
             self.logger.info(f"Exported hour {window_start.hour:02d}:00 data")
 
@@ -2205,18 +2493,17 @@ class VideoProcessor:
                 self.video_writer = None
 
             if self.config.save_video:
-                # Format: video_YYYYMMDD_HH00.mp4 for clean hour naming
                 date_str = window_end.strftime("%Y%m%d")
                 hour_str = window_end.strftime("%H")
 
-                if self.config.is_camera:
+                if getattr(self.config, 'is_camera', False):
                     filename = f"live_{date_str}_{hour_str}00.mp4"
                 else:
                     source_name = Path(self.config.input_source).stem
-                    filename = f"{source_name}_{date_str}_{hour_str}00.mp4"
+                    filename = f"{source_name}_{hour_str}00.mp4"
 
+                # _initialize_video_writer now handles the Month/Day folder creation
                 self._initialize_video_writer(filename)
-                self.logger.info(f"Started video for hour {hour_str}:00")
 
         except Exception as e:
             self.logger.error(f"Failed to rotate hourly video: {e}")
@@ -2224,6 +2511,8 @@ class VideoProcessor:
     def _reset_segment(self) -> None:
         """Reset segment tracking for new hour"""
         self.segment_start_time = time.time()
+
+        self.last_exported_segment = 0
 
         if hasattr(self, 'video_frame_number'):
             self.segment_start_frame = self.video_frame_number
@@ -2551,3 +2840,58 @@ class VideoProcessor:
         cv2.namedWindow(name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(name, nw, nh)
         cv2.moveWindow(name, x, y)
+
+    def _background_append_task(self, new_events: List, segment_id: str, video_name: str):
+        """Background thread to append new events to master log without blocking."""
+        if not new_events:
+            return
+
+        # Acquire lock to ensure we don't corrupt the Excel file with multiple writes
+        if self.export_lock.acquire(blocking=False):
+            try:
+                # Use the exporter's protected method to append ONLY these new events
+                self.exporter._append_to_master_log(
+                    new_events,
+                    video_source=video_name,
+                    segment_id=segment_id
+                )
+            except Exception as e:
+                self.logger.error(f"Live master log update failed: {e}")
+            finally:
+                self.export_lock.release()
+
+    def _trigger_live_export(self, force: bool = False):
+        """Check if we should export new events to master log."""
+        now = time.time()
+
+        # Only run if interval passed OR forced (e.g. at end of segment)
+        if force or (now - self.last_live_export_time >= self.live_export_interval):
+
+            # Get all events currently in memory
+            summary = self.counter.get_events_summary()
+            all_events = summary['events']
+            current_total = len(all_events)
+
+            # If new events since last export
+            if current_total > self.last_exported_event_count:
+                # Slice out only the new ones
+                new_events_slice = all_events[self.last_exported_event_count:]
+
+                # Deep copy to ensure thread safety
+                import copy
+                events_to_export = copy.deepcopy(new_events_slice)
+
+                segment_id = f"hour_{self.current_segment_start_dt.hour:02d}"
+                video_name = "LIVE_CAMERA" if self.is_live_source else self.current_video_path.name
+
+                # Spawn background thread
+                threading.Thread(
+                    target=self._background_append_task,
+                    args=(events_to_export, segment_id, video_name),
+                    daemon=True
+                ).start()
+
+                # Update tracker
+                self.last_exported_event_count = current_total
+
+            self.last_live_export_time = now

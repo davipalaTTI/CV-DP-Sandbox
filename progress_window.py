@@ -311,9 +311,18 @@ class ProgressWindow:
                 self.stats_labels['elapsed'].config(text=self._format_time(elapsed_seconds))
             except:
                 pass
-    
+
+    def set_status(self, status_text: str):
+        """Set a custom status message in the overall label"""
+        if not self.is_closed:
+            try:
+                self.overall_label.config(text=status_text)
+                self.root.update()
+            except tk.TclError:
+                self.is_closed = True
+
     # === Legacy compatibility methods ===
-    
+
     def update_frame_progress(self, current: int, total: int):
         """Legacy method for backward compatibility"""
         # Find first active video and update it
@@ -323,7 +332,7 @@ class ProgressWindow:
                 self.active_videos[worker_id].frames_processed = current
                 self.active_videos[worker_id].total_frames = total
         self._update_display()
-    
+
     def update_stats(self, text: str):
         """Legacy method - now shows in overall label"""
         if not self.is_closed:
@@ -340,7 +349,7 @@ class ProgressWindow:
                                 pass
             except:
                 pass
-    
+
     def on_close(self):
         """Handle window close"""
         self.is_closed = True
@@ -348,7 +357,7 @@ class ProgressWindow:
             self.root.destroy()
         except:
             pass
-    
+
     def close(self):
         """Close the progress window"""
         if not self.is_closed:
@@ -360,42 +369,42 @@ class SimpleProgressWindow:
     Simplified progress window for single video or basic progress tracking.
     Use this when you don't need per-video tracking.
     """
-    
+
     def __init__(self, title="Processing"):
         self.root = tk.Tk()
         self.root.title(title)
         self.root.geometry("500x180")
-        
+
         # Center window
         self.root.update_idletasks()
         x = (self.root.winfo_screenwidth() // 2) - 250
         y = (self.root.winfo_screenheight() // 2) - 90
         self.root.geometry(f"500x180+{x}+{y}")
-        
+
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
-        
+
         # Video progress
         ttk.Label(main_frame, text="Overall Progress:").pack(pady=5)
         self.video_progress = ttk.Progressbar(main_frame, length=450, mode='determinate')
         self.video_progress.pack(pady=5)
         self.video_label = ttk.Label(main_frame, text="")
         self.video_label.pack()
-        
+
         # Frame progress
         ttk.Label(main_frame, text="Current Video:").pack(pady=5)
         self.frame_progress = ttk.Progressbar(main_frame, length=450, mode='determinate')
         self.frame_progress.pack(pady=5)
         self.frame_label = ttk.Label(main_frame, text="")
         self.frame_label.pack()
-        
+
         # Stats
         self.stats_label = ttk.Label(main_frame, text="", font=("Arial", 9))
         self.stats_label.pack(pady=10)
-        
+
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.is_closed = False
-    
+
     def update_video_progress(self, current: int, total: int, name: str = ""):
         if not self.is_closed:
             self.video_progress['maximum'] = total
@@ -403,7 +412,7 @@ class SimpleProgressWindow:
             percentage = (current / total * 100) if total > 0 else 0
             self.video_label.config(text=f"Video {current}/{total} ({percentage:.1f}%): {name}")
             self.root.update()
-    
+
     def update_frame_progress(self, current: int, total: int, fps: float = 0.0):
         if not self.is_closed:
             self.frame_progress['maximum'] = total
@@ -412,16 +421,16 @@ class SimpleProgressWindow:
             fps_str = f" | {fps:.1f} FPS" if fps > 0 else ""
             self.frame_label.config(text=f"Frame {current}/{total} ({percentage:.1f}%){fps_str}")
             self.root.update()
-    
+
     def update_stats(self, text: str):
         if not self.is_closed:
             self.stats_label.config(text=text)
             self.root.update()
-    
+
     def on_close(self):
         self.is_closed = True
         self.root.destroy()
-    
+
     def close(self):
         if not self.is_closed:
             self.on_close()
