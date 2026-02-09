@@ -17,7 +17,6 @@ from config_manager import ConfigManager, AppConfig
 from gui_setup import InteractiveGUI
 from detection_engine import DetectionEngine
 from video_processor import VideoProcessor
-from results_export import ResultsExporter
 from utils import setup_logging, check_dependencies
 
 __version__ = "1.0.1"
@@ -126,7 +125,7 @@ class Application:
 
                 # Check if user loaded a complete config and wants to skip GUI setup
                 skip_interactive = getattr(self.config, '_skip_gui_setup', False)
-                
+
                 if skip_interactive and self.config.lines_config:
                     self.logger.info("Using loaded configuration (skipping interactive setup)")
                 else:
@@ -218,12 +217,11 @@ class Application:
             # Run the main processing loop
             results = self.video_processor.run()
 
-            # Export final results
+            # Note: Final results are NOT exported here because the master_event_log.xlsx
+            # is already incrementally updated during processing. Creating additional
+            # all_events_*.json/.csv/.xlsx files would be redundant.
             if results:
-                self.logger.info("Exporting final results...")
-                exporter = ResultsExporter(self.config.output_folder)
-                exporter.export_final_summary(results)
-                self.logger.info("Results exported successfully")
+                self.logger.info("Processing complete. All events already saved to master_event_log.xlsx")
 
             self.logger.info("Processing completed successfully")
             return 0
@@ -373,6 +371,10 @@ def main() -> int:
         logger.error(traceback.format_exc())
         print(f"\nUnexpected error: {e}")
         return 1
+    finally:
+        # Ensure logging queue is flushed before exit
+        from utils import stop_logging
+        stop_logging()
 
 
 # Development and debugging helpers

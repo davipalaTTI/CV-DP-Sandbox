@@ -15,4 +15,5 @@
 !training_mode.py
 !utils.py
 !video_processor.py
+!folder_monitor.py
 !cleanup_footage.py

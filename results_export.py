@@ -6,6 +6,8 @@ Handles hourly segment export of event logs only:
 - Multiple output formats (JSON, CSV, Excel)
 - Master event log that appends all events to single Excel file
 - No summaries or aggregations
+
+Uses a queue-based writer for non-blocking master log updates.
 """
 
 import json
@@ -16,8 +18,340 @@ from typing import Dict, List, Any, Optional, Union
 from dataclasses import dataclass
 import logging
 import datetime
+import threading
+import time
+from queue import Queue, Empty
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
+
+# Global lock for master log file access (shared across all ResultsExporter instances)
+_master_log_lock = threading.Lock()
+
+# ============================================================================
+# QUEUE-BASED MASTER LOG WRITER
+# Workers put events in a queue and continue immediately (non-blocking).
+# A single background thread handles all file I/O.
+# ============================================================================
+
+class MasterLogWriter:
+    """
+    Singleton background writer for master log.
+    Collects events from all workers via queue and writes in batches.
+    Workers never block waiting for file I/O.
+    """
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+
+        self._initialized = True
+        self.logger = logging.getLogger(__name__ + ".writer")
+
+        # Queue for pending writes
+        self._write_queue = Queue()
+
+        # Queue for dwell time updates
+        self._dwell_queue = Queue()
+
+        # Writer thread
+        self._writer_thread = None
+        self._stop_event = threading.Event()
+
+        # Batch settings
+        self._batch_interval = 5.0  # Write batches every 5 seconds
+        self._max_batch_size = 500  # Or when batch reaches this size
+
+        # Track master log path (set by first exporter)
+        self._master_log_path = None
+
+    def set_master_log_path(self, path: Path):
+        """Set the master log path (called by ResultsExporter)"""
+        if self._master_log_path is None:
+            self._master_log_path = path
+            self._start_writer()
+
+    def _start_writer(self):
+        """Start the background writer thread"""
+        if self._writer_thread is None or not self._writer_thread.is_alive():
+            self._stop_event.clear()
+            self._writer_thread = threading.Thread(
+                target=self._writer_loop,
+                daemon=True,
+                name="MasterLogWriter"
+            )
+            self._writer_thread.start()
+            self.logger.info("Master log writer thread started")
+
+    def queue_events(self, events: List[Dict], video_source: str, segment_id: str):
+        """
+        Queue events for writing (NON-BLOCKING).
+        Workers call this and continue immediately.
+        """
+        if events:
+            self._write_queue.put({
+                'events': events,
+                'video_source': video_source,
+                'segment_id': segment_id,
+                'timestamp': time.time()
+            })
+
+    def queue_dwell_update(self, updates: List[Dict], video_source: str):
+        """Queue dwell time updates (NON-BLOCKING)"""
+        if updates:
+            self._dwell_queue.put({
+                'updates': updates,
+                'video_source': video_source,
+                'timestamp': time.time()
+            })
+
+    def _writer_loop(self):
+        """Background thread that processes queued writes"""
+        self.logger.info("Writer loop started")
+
+        while not self._stop_event.is_set():
+            try:
+                # Collect batch of events
+                batch_events = []
+                batch_start = time.time()
+
+                # Collect events until batch interval or max size
+                while (time.time() - batch_start < self._batch_interval and
+                       len(batch_events) < self._max_batch_size):
+                    try:
+                        item = self._write_queue.get(timeout=0.5)
+                        batch_events.append(item)
+                    except Empty:
+                        pass
+
+                    if self._stop_event.is_set():
+                        break
+
+                # Write batch if we have events
+                if batch_events:
+                    self._write_batch(batch_events)
+
+                # Process dwell updates (less frequently)
+                self._process_dwell_updates()
+
+            except Exception as e:
+                self.logger.error(f"Writer loop error: {e}")
+                time.sleep(1)
+
+        # Flush remaining on shutdown
+        self._flush_all()
+        self.logger.info("Writer loop stopped")
+
+    def _write_batch(self, batch_items: List[Dict]):
+        """Write a batch of events to the master log"""
+        if not self._master_log_path or not batch_items:
+            return
+
+        # Prepare all rows
+        all_rows = []
+        for item in batch_items:
+            for event in item['events']:
+                event_type = 'line_crossing' if 'line_name' in event else 'zone_entry' if 'zone_name' in event else 'unknown'
+                dwell_val = event.get('dwell_seconds', 0.0)
+                if dwell_val is not None:
+                    try:
+                        dwell_val = float(dwell_val)
+                        if dwell_val < 0.3 or dwell_val > 86400:
+                            dwell_val = ''
+                    except:
+                        dwell_val = ''
+                else:
+                    dwell_val = ''
+
+                row = (
+                    event.get('actual_datetime', ''),
+                    event_type,
+                    event.get('track_id', ''),
+                    event.get('class_id', ''),
+                    event.get('class_name', ''),
+                    event.get('line_name', ''),
+                    event.get('zone_name', ''),
+                    event.get('direction', ''),
+                    event.get('confidence', ''),
+                    event.get('speed', 0.0),
+                    event.get('speed_units', ''),
+                    dwell_val,
+                    item['video_source'] or '',
+                    item['segment_id'] if item['segment_id'] is not None else ''
+                )
+                all_rows.append(row)
+
+        if not all_rows:
+            return
+
+        # Write to file with lock
+        max_retries = 3
+        for attempt in range(max_retries):
+            if not _master_log_lock.acquire(timeout=10):
+                self.logger.warning(f"Could not acquire lock for batch write (attempt {attempt + 1})")
+                continue
+
+            try:
+                if not self._master_log_path.exists():
+                    # Create file with headers
+                    df = pd.DataFrame(columns=[
+                        'actual_datetime', 'event_type', 'track_id',
+                        'class_id', 'class_name', 'line_name', 'zone_name',
+                        'direction', 'confidence', 'speed', 'speed_units', 'dwell_seconds',
+                        'video_source', 'segment_id'
+                    ])
+                    df.to_excel(self._master_log_path, sheet_name='Events', index=False, engine='openpyxl')
+
+                wb = load_workbook(self._master_log_path)
+                ws = wb.active
+                current_rows = ws.max_row
+
+                for row in all_rows:
+                    ws.append(row)
+
+                wb.save(self._master_log_path)
+                wb.close()
+
+                self.logger.info(f"Batch wrote {len(all_rows)} events to master log (total: {current_rows + len(all_rows) - 1})")
+                _master_log_lock.release()
+                return
+
+            except PermissionError:
+                self.logger.warning("Permission error, retrying...")
+                _master_log_lock.release()
+                time.sleep(0.5)
+            except Exception as e:
+                self.logger.error(f"Batch write failed: {e}")
+                _master_log_lock.release()
+                return
+
+        self.logger.error("Failed to write batch after retries")
+
+    def _process_dwell_updates(self):
+        """Process queued dwell time updates"""
+        updates_by_source = {}
+
+        # Collect all pending updates
+        while True:
+            try:
+                item = self._dwell_queue.get_nowait()
+                source = item['video_source']
+                if source not in updates_by_source:
+                    updates_by_source[source] = []
+                updates_by_source[source].extend(item['updates'])
+            except Empty:
+                break
+
+        if not updates_by_source:
+            return
+
+        # Apply updates (this still needs read-modify-write unfortunately)
+        if not _master_log_lock.acquire(timeout=5):
+            # Re-queue for next cycle
+            for source, updates in updates_by_source.items():
+                self._dwell_queue.put({'updates': updates, 'video_source': source, 'timestamp': time.time()})
+            return
+
+        try:
+            if not self._master_log_path or not self._master_log_path.exists():
+                return
+
+            df = pd.read_excel(self._master_log_path, sheet_name='Events', engine='openpyxl')
+            if df.empty:
+                return
+
+            updates_made = 0
+            for source, updates in updates_by_source.items():
+                for update in updates:
+                    track_id = update.get('track_id')
+                    zone_name = update.get('zone_name')
+                    new_dwell = update.get('dwell_seconds', 0.0)
+
+                    if not track_id or not zone_name:
+                        continue
+
+                    try:
+                        dwell = float(new_dwell) if new_dwell is not None else 0.0
+                        if dwell < 0 or dwell > 86400:
+                            continue
+                    except:
+                        continue
+
+                    mask = (
+                        (df['track_id'] == track_id) &
+                        (df['zone_name'] == zone_name) &
+                        (df['event_type'] == 'zone_entry')
+                    )
+                    if source:
+                        mask = mask & (df['video_source'] == source)
+
+                    if mask.any():
+                        df.loc[mask, 'dwell_seconds'] = dwell
+                        updates_made += 1
+
+            if updates_made > 0:
+                with pd.ExcelWriter(self._master_log_path, engine='openpyxl', mode='w') as writer:
+                    df.to_excel(writer, sheet_name='Events', index=False)
+                self.logger.debug(f"Updated dwell times for {updates_made} events")
+
+        except Exception as e:
+            self.logger.error(f"Dwell update failed: {e}")
+        finally:
+            _master_log_lock.release()
+
+    def _flush_all(self):
+        """Flush all remaining events on shutdown"""
+        # Collect all remaining events
+        remaining = []
+        while True:
+            try:
+                remaining.append(self._write_queue.get_nowait())
+            except Empty:
+                break
+
+        if remaining:
+            self._write_batch(remaining)
+
+        # Process remaining dwell updates
+        self._process_dwell_updates()
+
+    def flush_and_wait(self, timeout: float = 10.0):
+        """Force flush and wait for completion (call at end of processing)"""
+        # Signal we want to flush
+        flush_complete = threading.Event()
+
+        def flush_task():
+            self._flush_all()
+            flush_complete.set()
+
+        threading.Thread(target=flush_task, daemon=True).start()
+        flush_complete.wait(timeout=timeout)
+
+    def stop(self):
+        """Stop the writer thread"""
+        self._stop_event.set()
+        if self._writer_thread and self._writer_thread.is_alive():
+            self._writer_thread.join(timeout=15)
+
+
+# Global writer instance
+_master_log_writer = None
+
+def get_master_log_writer() -> MasterLogWriter:
+    """Get the global master log writer instance"""
+    global _master_log_writer
+    if _master_log_writer is None:
+        _master_log_writer = MasterLogWriter()
+    return _master_log_writer
 
 
 @dataclass
@@ -50,6 +384,9 @@ class ResultsExporter:
         # Initialize master log if it doesn't exist
         if self.config.enable_master_log:
             self._initialize_master_log()
+            # Register with the global queue-based writer
+            writer = get_master_log_writer()
+            writer.set_master_log_path(self.master_log_path)
 
         self.logger.info(f"Results exporter initialized: {self.output_folder}")
         if self.config.enable_master_log:
@@ -70,7 +407,10 @@ class ResultsExporter:
 
     def _append_to_master_log(self, event_list: List[Dict], video_source: str = None, segment_id: Union[int, str] = None):
         """
-        Append events to the master event log Excel file
+        Queue events for appending to master log (NON-BLOCKING).
+
+        Events are queued and written in batches by a background thread.
+        This allows workers to continue processing without waiting for file I/O.
 
         Args:
             event_list: List of event dictionaries to append
@@ -80,72 +420,56 @@ class ResultsExporter:
         if not self.config.enable_master_log or not event_list:
             return
 
-        try:
-            # Prepare rows to append
-            rows = []
-            for event in event_list:
-                # Determine event type
-                event_type = 'line_crossing' if 'line_name' in event else 'zone_entry' if 'zone_name' in event else 'unknown'
+        # Queue events for background writing (non-blocking)
+        import copy
+        events_copy = copy.deepcopy(event_list)
 
-                # Sanitize dwell_seconds - set to None/empty for invalid values
-                dwell_val = self._sanitize_dwell_time(event.get('dwell_seconds', 0.0))
+        writer = get_master_log_writer()
+        writer.queue_events(
+            events_copy,
+            video_source or '',
+            str(segment_id) if segment_id is not None else ''
+        )
 
-                row = {
-                    'actual_datetime': event.get('actual_datetime', ''),
-                    'event_type': event_type,
-                    'track_id': event.get('track_id', ''),
-                    'class_id': event.get('class_id', ''),
-                    'class_name': event.get('class_name', ''),
-                    'line_name': event.get('line_name', ''),
-                    'zone_name': event.get('zone_name', ''),
-                    'direction': event.get('direction', ''),
-                    'confidence': event.get('confidence', ''),
-                    'speed': event.get('speed', 0.0),
-                    'speed_units': event.get('speed_units', ''),
-                    'dwell_seconds': dwell_val,  # Will be None for invalid values
-                    'video_source': video_source or '',
-                    'segment_id': segment_id if segment_id is not None else ''
-                }
-                rows.append(row)
+        self.logger.debug(f"Queued {len(event_list)} events for master log")
 
-            # Convert to DataFrame
-            new_df = pd.DataFrame(rows)
+    def update_zone_dwell_times(self, zone_updates: List[Dict], video_source: str = None):
+        """
+        Queue dwell time updates for zone events (NON-BLOCKING).
+        Updates are processed by the background writer thread.
 
-            # Read existing data
-            try:
-                existing_df = pd.read_excel(self.master_log_path, sheet_name='Events', engine='openpyxl')
-            except:
-                # If file doesn't exist or is corrupted, create new
-                existing_df = pd.DataFrame(columns=new_df.columns)
+        Args:
+            zone_updates: List of dicts with 'track_id', 'zone_name', 'dwell_seconds'
+            video_source: Video source to match (for uniqueness)
+        """
+        if not self.config.enable_master_log or not zone_updates:
+            return
 
-            # Append new data
-            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+        # Queue updates for background processing (non-blocking)
+        import copy
+        updates_copy = copy.deepcopy(zone_updates)
 
-            # Write back to Excel
-            with pd.ExcelWriter(self.master_log_path, engine='openpyxl', mode='w') as writer:
-                combined_df.to_excel(writer, sheet_name='Events', index=False)
+        writer = get_master_log_writer()
+        writer.queue_dwell_update(updates_copy, video_source or '')
 
-                # Auto-adjust column widths
-                worksheet = writer.sheets['Events']
-                for idx, col in enumerate(combined_df.columns):
-                    if idx < 26:  # Excel column limit for single letters
-                        max_len = max(combined_df[col].astype(str).apply(len).max(), len(col)) + 2
-                        worksheet.column_dimensions[chr(65 + idx)].width = min(max_len, 50)
+        self.logger.debug(f"Queued {len(zone_updates)} dwell updates for master log")
 
-            self.logger.info(f"Appended {len(rows)} events to master log (total: {len(combined_df)})")
-
-        except Exception as e:
-            self.logger.error(f"Failed to append to master log: {e}")
-
-    def _sanitize_dwell_time(self, dwell_value) -> Optional[float]:
+    def _sanitize_dwell_time(self, dwell_value, min_dwell: float = 0.3) -> Optional[float]:
         """
         Validate and sanitize dwell time values.
-        Returns None for invalid values (negative or unreasonably large).
+        Returns None for invalid values (negative, below minimum, or unreasonably large).
+
+        Args:
+            dwell_value: Raw dwell time value
+            min_dwell: Minimum dwell time threshold (default 0.3 seconds)
         """
         try:
             dwell = float(dwell_value) if dwell_value is not None else 0.0
             # Invalid if negative or greater than 24 hours (86400 seconds)
             if dwell < 0 or dwell > 86400:
+                return None
+            # Filter below minimum threshold
+            if dwell < min_dwell:
                 return None
             return round(dwell, 2)
         except (ValueError, TypeError):
@@ -156,14 +480,14 @@ class ResultsExporter:
                        source_name: str = None) -> Dict[str, str]:
         """
         Export a segment of events - convenience wrapper for VideoWorker
-        
+
         Args:
             events_list: List of CountingEvent objects or event dictionaries
             segment_id: Segment identifier
             start_dt: Segment start datetime
             end_dt: Segment end datetime
             source_name: Optional source video filename
-            
+
         Returns:
             Dictionary of exported file paths
         """
@@ -203,18 +527,18 @@ class ResultsExporter:
                     'speed': getattr(evt, 'avg_speed', 0.0),
                     'speed_units': getattr(evt, 'speed_units', ''),
                     'dwell_seconds': dwell,
-                    'actual_datetime': getattr(evt, 'actual_datetime', '').isoformat() 
-                        if hasattr(getattr(evt, 'actual_datetime', ''), 'isoformat') 
+                    'actual_datetime': getattr(evt, 'actual_datetime', '').isoformat()
+                        if hasattr(getattr(evt, 'actual_datetime', ''), 'isoformat')
                         else str(getattr(evt, 'actual_datetime', ''))
                 })
-        
+
         # Build the events dictionary in the format expected by export_segment_results
         events_dict = {
             'events': event_dicts,
             '_window_start': start_dt.isoformat() if start_dt else datetime.datetime.now().isoformat(),
             '_window_end': end_dt.isoformat() if end_dt else datetime.datetime.now().isoformat()
         }
-        
+
         return self.export_segment_results(
             segment_id=segment_id,
             counts={},  # Not used in simplified version
@@ -226,11 +550,11 @@ class ResultsExporter:
     def export_video_summary(self, results: Dict, video_name: str = None) -> Dict[str, str]:
         """
         Export summary for a single video - convenience wrapper for VideoWorker
-        
+
         Args:
             results: Dictionary with 'final_counts', 'events_summary', 'stats' keys
             video_name: Name of the video file
-            
+
         Returns:
             Dictionary of exported file paths
         """
@@ -238,16 +562,16 @@ class ResultsExporter:
             exported_files = {}
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             prefix = f"{video_name}_" if video_name else ""
-            
+
             # Create summaries folder
             summaries_folder = self.output_folder / "summaries"
             summaries_folder.mkdir(parents=True, exist_ok=True)
-            
+
             # Export as JSON
             if 'json' in self.config.export_formats:
                 filename = f"{prefix}summary_{timestamp}.json"
                 filepath = summaries_folder / filename
-                
+
                 # Build summary data
                 summary_data = {
                     'video_name': video_name,
@@ -256,7 +580,7 @@ class ResultsExporter:
                     'events_summary': results.get('events_summary', {}),
                     'stats': {}
                 }
-                
+
                 # Handle ProcessingStats dataclass
                 stats = results.get('stats')
                 if stats:
@@ -267,15 +591,15 @@ class ResultsExporter:
                         summary_data['stats'] = vars(stats)
                     elif isinstance(stats, dict):
                         summary_data['stats'] = stats
-                
+
                 with open(filepath, 'w') as f:
                     json.dump(summary_data, f, indent=2, default=str)
-                
+
                 exported_files['summary_json'] = str(filepath)
                 self.logger.info(f"Video summary exported: {filepath}")
-            
+
             return exported_files
-            
+
         except Exception as e:
             self.logger.error(f"Failed to export video summary: {e}")
             return {}
@@ -299,9 +623,13 @@ class ResultsExporter:
             # Extract the event list - it's under 'events' key, not 'event_log'
             event_list = events.get('events', [])
 
+            # Convert segment_id to string for consistency
+            segment_id_str = str(segment_id) if segment_id is not None else ''
+            video_source_str = video_source or ''
+
             # Append to master log FIRST
             if self.config.enable_master_log:
-                self._append_to_master_log(event_list, video_source=video_source, segment_id=segment_id)
+                self._append_to_master_log(event_list, video_source=video_source_str, segment_id=segment_id_str)
 
             # Get window times for filename if available
             window_start = events.get('_window_start', datetime.datetime.now().isoformat())
@@ -317,19 +645,22 @@ class ResultsExporter:
                 timestamp = datetime.datetime.now()
                 time_str = timestamp.strftime("%H%M_%Y%m%d")
 
-            # Export in requested formats
+            # Export in requested formats with video_source and segment_id
             exported_files = {}
 
             if 'json' in self.config.export_formats:
-                json_path = self._export_segment_json(time_str, event_list, window_start, window_end)
+                json_path = self._export_segment_json(time_str, event_list, window_start, window_end,
+                                                      video_source=video_source_str, segment_id=segment_id_str)
                 exported_files['json'] = str(json_path)
 
             if 'csv' in self.config.export_formats:
-                csv_path = self._export_segment_csv(time_str, event_list, window_start, window_end)
+                csv_path = self._export_segment_csv(time_str, event_list, window_start, window_end,
+                                                    video_source=video_source_str, segment_id=segment_id_str)
                 exported_files['csv'] = str(csv_path)
 
             if 'excel' in self.config.export_formats:
-                excel_path = self._export_segment_excel(time_str, event_list, window_start, window_end)
+                excel_path = self._export_segment_excel(time_str, event_list, window_start, window_end,
+                                                        video_source=video_source_str, segment_id=segment_id_str)
                 exported_files['excel'] = str(excel_path)
 
             self.logger.info(f"Segment {segment_id} event log exported to {len(exported_files)} format(s)")
@@ -339,37 +670,27 @@ class ResultsExporter:
             self.logger.error(f"Failed to export segment {segment_id} results: {e}")
             return {}
 
-    def _export_segment_json(self, time_str: str, event_list: List[Dict], window_start: str, window_end: str) -> Path:
-        """Export event log as JSON"""
+    def _export_segment_json(self, time_str: str, event_list: List[Dict], window_start: str, window_end: str,
+                              video_source: str = '', segment_id: str = '') -> Path:
+        """Export event log as JSON with standardized fields"""
         filename = f"events_{time_str}.json"
         filepath = self.segments_folder / filename
 
-        # Filter events to only include desired fields
-        filtered_events = []
+        # Standardize all events
+        standardized_events = []
         for event in event_list:
-            # Determine event type
-            event_type = 'line_crossing' if 'line_name' in event else 'zone_entry' if 'zone_name' in event else 'unknown'
+            std_event = self._standardize_event_fields(event)
+            # Add video_source and segment_id if not present
+            if not std_event.get('video_source'):
+                std_event['video_source'] = video_source
+            if not std_event.get('segment_id'):
+                std_event['segment_id'] = segment_id
+            standardized_events.append(std_event)
 
-            filtered_event = {
-                'actual_datetime': event.get('actual_datetime', ''),
-                'event_type': event_type,
-                'track_id': event.get('track_id', ''),
-                'class_id': event.get('class_id', ''),
-                'class_name': event.get('class_name', ''),
-                'line_name': event.get('line_name', ''),
-                'zone_name': event.get('zone_name', ''),
-                'direction': event.get('direction', ''),
-                'confidence': event.get('confidence', ''),
-                'speed': event.get('speed', 0.0),
-                'speed_units': event.get('speed_units', ''),
-                'dwell_seconds': event.get('dwell_seconds', 0.0),
-            }
-            filtered_events.append(filtered_event)
-
-        # Structure the JSON with metadata and filtered events
+        # Structure the JSON with metadata and standardized events
         data = {
-            "event_count": len(filtered_events),
-            "events": filtered_events
+            "event_count": len(standardized_events),
+            "events": standardized_events
         }
 
         with open(filepath, 'w') as f:
@@ -377,103 +698,75 @@ class ResultsExporter:
 
         return filepath
 
-    def _export_segment_csv(self, time_str: str, event_list: List[Dict], window_start: str, window_end: str) -> Path:
-        """Export event log as CSV"""
+    def _export_segment_csv(self, time_str: str, event_list: List[Dict], window_start: str, window_end: str,
+                            video_source: str = '', segment_id: str = '') -> Path:
+        """Export event log as CSV with standardized fields"""
         filename = f"events_{time_str}.csv"
         filepath = self.segments_folder / filename
 
+        # Standard column order
+        standard_columns = [
+            'actual_datetime', 'event_type', 'track_id', 'class_id', 'class_name',
+            'line_name', 'zone_name', 'direction', 'confidence', 'speed', 'speed_units',
+            'dwell_seconds', 'video_source', 'segment_id'
+        ]
+
         if not event_list:
-            # Write empty CSV with headers
+            # Write empty CSV with standard headers
             with open(filepath, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['actual_datetime', 'event_type', 'track_id',
-                               'class_id', 'class_name', 'line_name', 'zone_name',
-                               'direction', 'confidence',
-                               'speed', 'speed_units', 'dwell_seconds'])
+                writer.writerow(standard_columns)
             return filepath
 
-        # Flatten event data for CSV
-        rows = []
+        # Standardize all events
+        standardized_events = []
         for event in event_list:
-            # Determine event type
-            event_type = 'line_crossing' if 'line_name' in event else 'zone_entry' if 'zone_name' in event else 'unknown'
+            std_event = self._standardize_event_fields(event)
+            if not std_event.get('video_source'):
+                std_event['video_source'] = video_source
+            if not std_event.get('segment_id'):
+                std_event['segment_id'] = segment_id
+            standardized_events.append(std_event)
 
-            # Extract position coordinates if available
-            position = event.get('position', None)
-            pos_x = position[0] if position else ''
-            pos_y = position[1] if position else ''
-
-            row = {
-                'actual_datetime': event.get('actual_datetime', ''),
-                'event_type': event_type,
-                'track_id': event.get('track_id', ''),
-                'class_id': event.get('class_id', ''),
-                'class_name': event.get('class_name', ''),
-                'line_name': event.get('line_name', ''),
-                'zone_name': event.get('zone_name', ''),
-                'direction': event.get('direction', ''),
-                'confidence': event.get('confidence', ''),
-                'speed': event.get('speed', 0.0),
-                'speed_units': event.get('speed_units', ''),
-                'dwell_seconds': event.get('dwell_seconds', 0.0),
-            }
-            rows.append(row)
-
-        # Write to CSV
-        if rows:
-            df = pd.DataFrame(rows)
-            df.to_csv(filepath, index=False)
-        else:
-            # Write empty CSV with headers
-            with open(filepath, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(list(rows[0].keys()) if rows else [])
+        # Write to CSV with standard column order
+        df = pd.DataFrame(standardized_events)
+        df = self._reorder_columns(df)
+        df.to_csv(filepath, index=False)
 
         return filepath
 
-    def _export_segment_excel(self, time_str: str, event_list: List[Dict], window_start: str, window_end: str) -> Path:
-        """Export event log as Excel file"""
+    def _export_segment_excel(self, time_str: str, event_list: List[Dict], window_start: str, window_end: str,
+                              video_source: str = '', segment_id: str = '') -> Path:
+        """Export event log as Excel file with standardized fields"""
         filename = f"events_{time_str}.xlsx"
         filepath = self.segments_folder / filename
 
+        # Standard column order
+        standard_columns = [
+            'actual_datetime', 'event_type', 'track_id', 'class_id', 'class_name',
+            'line_name', 'zone_name', 'direction', 'confidence', 'speed', 'speed_units',
+            'dwell_seconds', 'video_source', 'segment_id'
+        ]
+
         if not event_list:
-            # Create empty Excel with headers
-            df = pd.DataFrame(columns=['actual_datetime', 'event_type', 'track_id',
-                                      'class_id', 'class_name', 'line_name', 'zone_name',
-                                      'direction', 'confidence',
-                                      'speed', 'speed_units', 'dwell_seconds'])
+            # Create empty Excel with standard headers
+            df = pd.DataFrame(columns=standard_columns)
             df.to_excel(filepath, index=False, engine='openpyxl')
             return filepath
 
-        # Flatten event data for Excel
-        rows = []
+        # Standardize all events
+        standardized_events = []
         for event in event_list:
-            # Determine event type
-            event_type = 'line_crossing' if 'line_name' in event else 'zone_entry' if 'zone_name' in event else 'unknown'
+            std_event = self._standardize_event_fields(event)
+            if not std_event.get('video_source'):
+                std_event['video_source'] = video_source
+            if not std_event.get('segment_id'):
+                std_event['segment_id'] = segment_id
+            standardized_events.append(std_event)
 
-            # Extract position coordinates if available
-            position = event.get('position', None)
-            pos_x = position[0] if position else ''
-            pos_y = position[1] if position else ''
-
-            row = {
-                'actual_datetime': event.get('actual_datetime', ''),
-                'event_type': event_type,
-                'track_id': event.get('track_id', ''),
-                'class_id': event.get('class_id', ''),
-                'class_name': event.get('class_name', ''),
-                'line_name': event.get('line_name', ''),
-                'zone_name': event.get('zone_name', ''),
-                'direction': event.get('direction', ''),
-                'confidence': event.get('confidence', ''),
-                'speed': event.get('speed', 0.0),
-                'speed_units': event.get('speed_units', ''),
-                'dwell_seconds': self._sanitize_dwell_time(event.get('dwell_seconds', 0.0)),
-            }
-            rows.append(row)
-
-        # Create DataFrame and export to Excel
-        df = pd.DataFrame(rows)
+        # Create DataFrame with standard column order
+        df = pd.DataFrame(standardized_events)
+        df = self._reorder_columns(df)
 
         # Write to Excel with formatting
         with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
@@ -490,10 +783,10 @@ class ResultsExporter:
 
     def export_final_summary(self, results: Dict) -> Dict[str, str]:
         """
-        Export final results - simplified to just combine all event logs
+        Export final results - combines all event logs from processing
 
         Args:
-            results: Final processing results
+            results: Final processing results (supports multiple result structures)
 
         Returns:
             Dictionary of exported file paths
@@ -504,70 +797,84 @@ class ResultsExporter:
             # Create a simple final export with all events combined
             all_events = []
 
-            # Extract events from results if available
-            if 'events' in results and 'events' in results['events']:
-                all_events = results['events']['events']
-            elif 'events' in results:
-                all_events = results.get('events', [])
+            # Extract events from results - handle multiple possible structures
+            if 'video_results' in results:
+                # Batch video processing - aggregate from all videos
+                for video_result in results.get('video_results', []):
+                    if isinstance(video_result, dict):
+                        # Get video source name for tagging events
+                        video_source = video_result.get('video_path', '')
+                        if video_source:
+                            video_source = Path(video_source).name
+
+                        events_summary = video_result.get('events_summary', {})
+                        video_events = events_summary.get('events', [])
+
+                        # Tag each event with video source if not already present
+                        for evt in video_events:
+                            if isinstance(evt, dict) and not evt.get('video_source'):
+                                evt['video_source'] = video_source
+
+                        all_events.extend(video_events)
+            elif 'events_summary' in results:
+                # Single video/camera processing
+                all_events = results['events_summary'].get('events', [])
+            elif 'events' in results and isinstance(results['events'], dict):
+                all_events = results['events'].get('events', [])
+            elif 'events' in results and isinstance(results['events'], list):
+                all_events = results['events']
 
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            # Standardize all events to consistent field format
+            standardized_events = []
+            for event in all_events:
+                standardized_events.append(self._standardize_event_fields(event))
 
             if 'json' in self.config.export_formats:
                 filename = f"all_events_{timestamp}.json"
                 filepath = self.output_folder / filename
 
-                # Filter events to only include desired fields
-                filtered_events = []
-                for event in all_events:
-                    # Determine event type
-                    event_type = 'line_crossing' if 'line_name' in event else 'zone_entry' if 'zone_name' in event else 'unknown'
-
-                    filtered_event = {
-                        'actual_datetime': event.get('actual_datetime', ''),
-                        'event_type': event_type,
-                        'track_id': event.get('track_id', ''),
-                        'class_id': event.get('class_id', ''),
-                        'class_name': event.get('class_name', ''),
-                        'line_name': event.get('line_name', ''),
-                        'zone_name': event.get('zone_name', ''),
-                        'direction': event.get('direction', ''),
-                        'confidence': event.get('confidence', ''),
-                        'speed': event.get('speed', 0.0),
-                        'speed_units': event.get('speed_units', ''),
-                        'dwell_seconds': event.get('dwell_seconds', 0.0),
-                    }
-                    filtered_events.append(filtered_event)
-
                 data = {
                     "export_timestamp": datetime.datetime.now().isoformat(),
-                    "total_events": len(filtered_events),
-                    "events": filtered_events
+                    "total_events": len(standardized_events),
+                    "events": standardized_events
                 }
 
-            if 'csv' in self.config.export_formats and all_events:
+                # Write JSON file
+                with open(filepath, 'w') as f:
+                    json.dump(data, f, indent=2, default=str)
+
+                exported_files['final_json'] = str(filepath)
+                self.logger.info(f"Final JSON exported: {filepath}")
+
+            if 'csv' in self.config.export_formats and standardized_events:
                 filename = f"all_events_{timestamp}.csv"
                 filepath = self.output_folder / filename
 
-                # Convert events to DataFrame and save
-                df = pd.DataFrame(all_events)
+                # Convert to DataFrame with consistent column order
+                df = pd.DataFrame(standardized_events)
+                df = self._reorder_columns(df)
                 df.to_csv(filepath, index=False)
 
                 exported_files['final_csv'] = str(filepath)
                 self.logger.info(f"Final CSV exported: {filepath}")
 
-            if 'excel' in self.config.export_formats and all_events:
+            if 'excel' in self.config.export_formats and standardized_events:
                 filename = f"all_events_{timestamp}.xlsx"
                 filepath = self.output_folder / filename
 
-                # Convert events to DataFrame and save
-                df = pd.DataFrame(all_events)
+                # Convert to DataFrame with consistent column order
+                df = pd.DataFrame(standardized_events)
+                df = self._reorder_columns(df)
+
                 with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
                     df.to_excel(writer, sheet_name='All_Events', index=False)
 
                     # Auto-adjust column widths
                     worksheet = writer.sheets['All_Events']
                     for idx, col in enumerate(df.columns):
-                        if idx < 26:  # Excel column limit
+                        if idx < 26:  # Excel column limit for single letters
                             max_len = max(df[col].astype(str).apply(len).max(), len(col)) + 2
                             worksheet.column_dimensions[chr(65 + idx)].width = min(max_len, 50)
 
@@ -579,6 +886,64 @@ class ResultsExporter:
         except Exception as e:
             self.logger.error(f"Failed to export final summary: {e}")
             return {}
+
+    def _standardize_event_fields(self, event: Dict) -> Dict:
+        """
+        Standardize event dictionary to have consistent fields in consistent order.
+
+        Standard fields: actual_datetime, event_type, track_id, class_id, class_name,
+                        line_name, zone_name, direction, confidence, speed, speed_units,
+                        dwell_seconds, video_source, segment_id
+        """
+        # Determine event type
+        if event.get('line_name'):
+            event_type = 'line_crossing'
+        elif event.get('zone_name'):
+            event_type = 'zone_entry'
+        else:
+            event_type = event.get('event_type', 'unknown')
+
+        return {
+            'actual_datetime': event.get('actual_datetime', ''),
+            'event_type': event_type,
+            'track_id': event.get('track_id', ''),
+            'class_id': event.get('class_id', ''),
+            'class_name': event.get('class_name', ''),
+            'line_name': event.get('line_name', ''),
+            'zone_name': event.get('zone_name', ''),
+            'direction': event.get('direction', ''),
+            'confidence': event.get('confidence', ''),
+            'speed': event.get('speed', 0.0),
+            'speed_units': event.get('speed_units', ''),
+            'dwell_seconds': self._sanitize_dwell_time(event.get('dwell_seconds', 0.0)),
+            'video_source': event.get('video_source', ''),
+            'segment_id': event.get('segment_id', '')
+        }
+
+    def _reorder_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Reorder DataFrame columns to standard order, adding missing columns as empty.
+
+        Standard order: actual_datetime, event_type, track_id, class_id, class_name,
+                       line_name, zone_name, direction, confidence, speed, speed_units,
+                       dwell_seconds, video_source, segment_id
+        """
+        standard_columns = [
+            'actual_datetime', 'event_type', 'track_id', 'class_id', 'class_name',
+            'line_name', 'zone_name', 'direction', 'confidence', 'speed', 'speed_units',
+            'dwell_seconds', 'video_source', 'segment_id'
+        ]
+
+        # Add missing columns with empty values
+        for col in standard_columns:
+            if col not in df.columns:
+                df[col] = ''
+
+        # Reorder to standard order, keeping any extra columns at the end
+        extra_columns = [col for col in df.columns if col not in standard_columns]
+        ordered_columns = standard_columns + extra_columns
+
+        return df[ordered_columns]
 
     def export_live_stats(self, stats_data: Dict) -> str:
         """

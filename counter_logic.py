@@ -21,14 +21,15 @@ from config_manager import CountingLine, CountingZone
 import datetime
 
 
-def sanitize_dwell_time(dwell_seconds: float) -> float:
+def sanitize_dwell_time(dwell_seconds: float, min_dwell: float = 0.0) -> float:
     """
     Validate and sanitize dwell time values.
-    Returns 0.0 for invalid values (negative or unreasonably large).
-    
+    Returns 0.0 for invalid values (negative, below minimum, or unreasonably large).
+
     Args:
         dwell_seconds: Raw dwell time value
-        
+        min_dwell: Minimum dwell time threshold (default 0.0, use 0.3 for export filtering)
+
     Returns:
         Sanitized dwell time (0.0 if invalid, otherwise rounded to 2 decimals)
     """
@@ -36,6 +37,9 @@ def sanitize_dwell_time(dwell_seconds: float) -> float:
         dwell = float(dwell_seconds) if dwell_seconds is not None else 0.0
         # Invalid if negative or greater than 24 hours (86400 seconds)
         if dwell < 0 or dwell > 86400:
+            return 0.0
+        # Filter below minimum threshold
+        if dwell < min_dwell:
             return 0.0
         return round(dwell, 2)
     except (ValueError, TypeError):
@@ -1190,8 +1194,22 @@ class ObjectCounter:
 
         self.logger.info("All counters reset")
 
-    def get_events_summary(self) -> Dict:
-        """Get summary of all counting events with enriched data"""
+    def get_events_summary(self, current_video_time: datetime.datetime = None) -> Dict:
+        """Get summary of all counting events with enriched data
+
+        Args:
+            current_video_time: The current video timestamp (datetime). If None, uses time.time()
+                               which may cause issues with pre-recorded videos.
+        """
+        # Use video timestamp if provided, otherwise fall back to wall clock
+        if current_video_time is not None:
+            if hasattr(current_video_time, 'timestamp'):
+                current_time = current_video_time.timestamp()
+            else:
+                current_time = float(current_video_time)
+        else:
+            current_time = time.time()
+
         events_list = []
 
         for event in self.counting_events:
@@ -1242,10 +1260,10 @@ class ObjectCounter:
 
                     # Check if object is still in zone
                     if event.zone_name in obj_state.zone_presence and obj_state.zone_presence[event.zone_name]:
-                        # Object still in zone - calculate current dwell time
+                        # Object still in zone - calculate current dwell time using VIDEO time
                         if event.zone_name in obj_state.zone_entry_times:
                             entry_time = obj_state.zone_entry_times[event.zone_name]
-                            dwell_sec = time.time() - entry_time
+                            dwell_sec = current_time - entry_time
 
                             # Validate calculated dwell time
                             if dwell_sec < 0 or dwell_sec > 86400:
@@ -1259,8 +1277,9 @@ class ObjectCounter:
                             if dwell_sec < 0 or dwell_sec > 86400:
                                 dwell_sec = 0.0
 
-                event_dict['dwell_time'] = f"{dwell_sec:.2f}s" if dwell_sec > 0 else ""
-                event_dict['dwell_seconds'] = sanitize_dwell_time(dwell_sec)
+                # Apply minimum dwell threshold of 0.3 seconds for export
+                event_dict['dwell_time'] = f"{dwell_sec:.2f}s" if dwell_sec >= 0.3 else ""
+                event_dict['dwell_seconds'] = sanitize_dwell_time(dwell_sec, min_dwell=0.3)
 
             events_list.append(event_dict)
 
@@ -1350,9 +1369,21 @@ class ObjectCounter:
         self.logger.info(f"Rebuilt counters for frame size: {frame_size}")
 
 
-    def update_events_with_final_stats(self) -> None:
-        """Update all events with final/current statistics before export"""
-        current_time = time.time()
+    def update_events_with_final_stats(self, current_video_time: datetime.datetime = None) -> None:
+        """Update all events with final/current statistics before export
+
+        Args:
+            current_video_time: The current video timestamp (datetime). If None, uses time.time()
+                               which may cause issues with pre-recorded videos.
+        """
+        # Use video timestamp if provided, otherwise fall back to wall clock
+        if current_video_time is not None:
+            if hasattr(current_video_time, 'timestamp'):
+                current_time = current_video_time.timestamp()
+            else:
+                current_time = float(current_video_time)
+        else:
+            current_time = time.time()
 
         for event in self.counting_events:
             if event.track_id not in self.object_states:
@@ -1380,8 +1411,11 @@ class ObjectCounter:
                 # If still in zone, add current session time
                 if obj_state.zone_presence.get(zone_name, False):
                     if zone_name in obj_state.zone_entry_times:
-                        current_session = current_time - obj_state.zone_entry_times[zone_name]
-                        total_dwell += current_session
+                        entry_time = obj_state.zone_entry_times[zone_name]
+                        current_session = current_time - entry_time
+                        # Only add if reasonable (positive and less than 24 hours)
+                        if 0 <= current_session <= 86400:
+                            total_dwell += current_session
 
-                # FIXED: Sanitize final dwell time
-                event.dwell_seconds = sanitize_dwell_time(total_dwell)
+                # FIXED: Sanitize final dwell time with minimum threshold of 0.3 seconds
+                event.dwell_seconds = sanitize_dwell_time(total_dwell, min_dwell=0.3)
