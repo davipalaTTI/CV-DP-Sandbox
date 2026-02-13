@@ -1,0 +1,30 @@
+# Multi-Line Object Counter - Requirements
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+opencv-python>=4.8.0
+numpy>=1.24.0
+ultralytics>=8.0.0
+torch>=2.0.0
+pyyaml>=6.0
+pandas>=2.0.0
+openpyxl>=3.1.0
+psutil>=5.9.0
+pillow>=9.0.0
+
+# Visualization dependencies
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Optional: PostgreSQL cloud database support
+# Uncomment the line below if you need cloud upload functionality
+# psycopg2-binary>=2.9.0
+
+# Optional: TensorRT for NVIDIA GPU optimization
+# TensorRT cannot be installed via pip - install manually from NVIDIA:
+# https://developer.nvidia.com/tensorrt
+# Use .pt (PyTorch) or .onnx models if you don't need TensorRT optimization
+
+# Note: tkinter is required but comes bundled with Python on most systems
+# If missing on Linux: sudo apt-get install python3-tk
+
