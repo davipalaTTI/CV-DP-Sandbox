@@ -4,7 +4,7 @@ Results Export Module - Simplified Event Log Export
 Handles hourly segment export of event logs only:
 - Event log data per hourly segment
 - Multiple output formats (JSON, CSV, Excel)
-- Master event log that appends all events to single Excel file
+- Master event log that appends all events to single Excel file and JSON log
 - No summaries or aggregations
 
 Uses a queue-based writer for non-blocking master log updates.
@@ -380,6 +380,7 @@ class ResultsExporter:
 
         # Master event log file
         self.master_log_path = self.output_folder / "master_event_log.xlsx"
+        self.master_json_path = self.output_folder / "master_event_log.json"
 
         # Initialize master log if it doesn't exist
         if self.config.enable_master_log:
@@ -394,6 +395,11 @@ class ResultsExporter:
 
     def _initialize_master_log(self):
         """Initialize the master event log Excel file if it doesn't exist"""
+        if not self.master_json_path.exists():
+            # Create new file
+            self.master_json_path.touch()
+            self.logger.info(f"Created master JSON event log: {self.master_json_path}")
+
         if not self.master_log_path.exists():
             # Create new file with headers
             df = pd.DataFrame(columns=[
@@ -422,6 +428,33 @@ class ResultsExporter:
 
         # Queue events for background writing (non-blocking)
         import copy
+
+        try:
+            with open(self.master_json_path, 'a') as f:
+                for event in event_list:
+                    # Create a copy and add the metadata fields
+                    json_entry = {
+                        'actual_datetime': event.get('actual_datetime', ''),
+                        'event_type': 'line_crossing' if 'line_name' in event and event['line_name'] else
+                        'zone_entry' if 'zone_name' in event and event['zone_name'] else 'unknown',
+                        'track_id': event.get('track_id', ''),
+                        'class_id': event.get('class_id', ''),
+                        'class_name': event.get('class_name', ''),
+                        'line_name': event.get('line_name', ''),
+                        'zone_name': event.get('zone_name', ''),
+                        'direction': event.get('direction', ''),
+                        'confidence': event.get('confidence', ''),
+                        'speed': event.get('speed', 0.0),
+                        'speed_units': event.get('speed_units', ''),
+                        'dwell_seconds': self._sanitize_dwell_time(event.get('dwell_seconds', 0.0)),
+                        'video_source': video_source or '',
+                        'segment_id': str(segment_id) if segment_id is not None else ''
+                    }
+
+                    f.write(json.dumps(json_entry, default=str) + "\n")
+        except Exception as e:
+            self.logger.error(f"Failed to append event to master log: {e}")
+
         events_copy = copy.deepcopy(event_list)
 
         writer = get_master_log_writer()

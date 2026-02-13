@@ -15,6 +15,8 @@ import time
 from typing import Optional, Dict, List
 from dataclasses import dataclass, field
 from collections import deque
+import logging
+import os
 
 
 @dataclass
@@ -83,6 +85,12 @@ class ProgressWindow:
 
         # Build UI
         self._build_ui()
+
+        self.root.bind("<Escape>", self.on_close)
+        self.root.bind("<Control-c>", self.on_close)
+        self.root.bind("<Control-C>", self.on_close)
+
+        self.logger = logging.getLogger(__name__)
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.is_closed = False
@@ -385,13 +393,16 @@ class ProgressWindow:
             except:
                 pass
 
-    def on_close(self):
+    def on_close(self, event=None):
         """Handle window close"""
         self.is_closed = True
-        try:
-            self.root.destroy()
-        except:
-            pass
+        print("\n[EXIT] Closing down... please wait a moment.")
+
+        time.sleep(0.5)
+
+        os._exit(0)
+        # self.root.destroy()
+
 
     def close(self):
         """Close the progress window"""

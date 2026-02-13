@@ -1257,16 +1257,31 @@ class VideoProcessor:
                 # Check if we're done
                 if active_workers == 0 and video_queue.empty():
                     if self.config.input_type.value == "folder":
-                        # Wait indefinitely for new files (folder monitoring mode)
-                        self.logger.info("All current videos processed, waiting for new files... (Ctrl+C to stop)")
-                        progress.set_status("Waiting for new files... (Ctrl+C to stop)")
+                        self.logger.info("Waiting for new files... (Press ESC or Ctrl+C to exit)")
+                        progress.set_status("Waiting for new files... (Press ESC or Ctrl+C to exit)")
+
+                        # [RESIZED IDLE LOOP]
                         while video_queue.empty():
-                            time.sleep(2)  # Check every 2 seconds
+                            # 1. Keep the Progress Window alive so it doesn't "Not Respond"
+                            if progress and not progress.is_closed:
+                                try:
+                                    # This allows the window to see the Ctrl+C you just bound
+                                    progress.root.update()
+                                except:
+                                    break
+
+                            # 2. Keep OpenCV alive too (standard practice)
+                            cv2.waitKey(100)
+
+                            # 3. Small sleep to keep CPU usage low
+                            time.sleep(0.05)
+
                         self.logger.info("New video detected, resuming processing...")
+                        continue
                     else:
                         break
 
-                # Small sleep to prevent busy-waiting
+                    # Standard loop sleep to prevent busy-waiting while processing
                 time.sleep(0.1)
 
         except KeyboardInterrupt:
