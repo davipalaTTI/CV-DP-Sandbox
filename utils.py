@@ -142,16 +142,16 @@ _log_queue_listener = None
 class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
     """
     A RotatingFileHandler that gracefully handles file locking issues on Windows.
-
+    
     When rotation fails (e.g., due to OneDrive sync or another process locking
     the file), it simply continues logging to the current file instead of raising
     an error. Rotation will be attempted again on the next write that exceeds maxBytes.
     """
-
+    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._rotation_failed = False
-
+    
     def doRollover(self):
         """Perform rotation, but handle errors gracefully"""
         try:
@@ -159,7 +159,7 @@ class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
             if self.stream:
                 self.stream.close()
                 self.stream = None
-
+            
             # Attempt rotation
             if self.backupCount > 0:
                 # Delete oldest backup if it exists
@@ -173,7 +173,7 @@ class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
                             os.rename(sfn, dfn)
                         except (OSError, PermissionError):
                             pass  # Ignore rotation errors for backups
-
+                
                 # Rotate current to .1
                 dfn = self.rotation_filename(f"{self.baseFilename}.1")
                 try:
@@ -186,11 +186,11 @@ class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
                     # Rotation failed - file is locked (probably OneDrive)
                     # Just continue with the same file
                     self._rotation_failed = True
-
+            
             # Reopen stream
             if not self.delay:
                 self.stream = self._open()
-
+                
         except Exception:
             # Any other error - just try to keep logging
             self._rotation_failed = True
@@ -199,7 +199,7 @@ class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
                     self.stream = self._open()
                 except Exception:
                     pass
-
+    
     def shouldRollover(self, record):
         """Check if rollover should occur, but be more lenient after failed rotation"""
         if self._rotation_failed:
@@ -210,7 +210,7 @@ class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
                     self.stream = self._open()
                 except Exception:
                     return False
-
+            
             try:
                 self.stream.seek(0, 2)  # Seek to end
                 # Only retry rotation after file grows another 50% beyond maxBytes
@@ -220,7 +220,7 @@ class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
             except Exception:
                 pass
             return False
-
+        
         return super().shouldRollover(record)
 
 
@@ -230,7 +230,7 @@ def setup_logging(level: int = logging.INFO,
                   format_string: Optional[str] = None) -> logging.Logger:
     """
     Set up comprehensive logging configuration with thread-safe file handling.
-
+    
     Uses QueueHandler + QueueListener pattern with a SafeRotatingFileHandler
     to prevent file locking issues on Windows/OneDrive.
 
@@ -244,7 +244,7 @@ def setup_logging(level: int = logging.INFO,
         Configured logger
     """
     global _log_queue_listener
-
+    
     # Create logs directory if needed
     if log_file:
         log_path = Path(log_file)
@@ -293,15 +293,15 @@ def setup_logging(level: int = logging.INFO,
     if handlers:
         from queue import Queue
         log_queue = Queue(-1)  # Unlimited queue size
-
+        
         # QueueHandler for the root logger (all threads put logs here)
         queue_handler = logging.handlers.QueueHandler(log_queue)
         queue_handler.setLevel(level)
         root_logger.addHandler(queue_handler)
-
+        
         # QueueListener processes the queue in a single thread (thread-safe file writes)
         _log_queue_listener = logging.handlers.QueueListener(
-            log_queue,
+            log_queue, 
             *handlers,
             respect_handler_level=True
         )

@@ -25,11 +25,11 @@ def sanitize_dwell_time(dwell_seconds: float, min_dwell: float = 0.0) -> float:
     """
     Validate and sanitize dwell time values.
     Returns 0.0 for invalid values (negative, below minimum, or unreasonably large).
-
+    
     Args:
         dwell_seconds: Raw dwell time value
         min_dwell: Minimum dwell time threshold (default 0.0, use 0.3 for export filtering)
-
+        
     Returns:
         Sanitized dwell time (0.0 if invalid, otherwise rounded to 2 decimals)
     """
@@ -1196,7 +1196,7 @@ class ObjectCounter:
 
     def get_events_summary(self, current_video_time: datetime.datetime = None) -> Dict:
         """Get summary of all counting events with enriched data
-
+        
         Args:
             current_video_time: The current video timestamp (datetime). If None, uses time.time()
                                which may cause issues with pre-recorded videos.
@@ -1209,7 +1209,7 @@ class ObjectCounter:
                 current_time = float(current_video_time)
         else:
             current_time = time.time()
-
+            
         events_list = []
 
         for event in self.counting_events:
@@ -1371,7 +1371,7 @@ class ObjectCounter:
 
     def update_events_with_final_stats(self, current_video_time: datetime.datetime = None) -> None:
         """Update all events with final/current statistics before export
-
+        
         Args:
             current_video_time: The current video timestamp (datetime). If None, uses time.time()
                                which may cause issues with pre-recorded videos.

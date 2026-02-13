@@ -130,6 +130,11 @@ class AppConfig:
     folder_idle_timeout: float = 0.0  # Seconds to wait for new files before exiting (0 = wait forever)
     pre_process_stability_seconds: float = 10.0  # Seconds file must be stable before starting processing
 
+    # Cloud database upload settings (optional - leave blank to skip cloud upload)
+    cloud_db_name: str = ""  # Database section name in config file (e.g., 'cv-database')
+    cloud_table_name: str = ""  # Target table name for uploads
+    cloud_db_config_path: str = ""  # Path to database config file
+
 
 class ConfigManager:
     """Manages application configuration"""
@@ -188,6 +193,12 @@ class ConfigManager:
             'training_confidence': tk.StringVar(value="0.5"),
             'training_empty': tk.BooleanVar(value=False),
             'training_augment': tk.BooleanVar(value=False),
+        }
+
+        cloud_db_vars = {
+            'cloud_db_name': tk.StringVar(value=""),
+            'cloud_table_name': tk.StringVar(value=""),
+            'cloud_db_config_path': tk.StringVar(value=""),
         }
 
         # --- NEW: Aggregation + alignment vars ---
@@ -365,6 +376,10 @@ class ConfigManager:
                 training_min_confidence=float(training_vars['training_confidence'].get() or 0.5),
                 training_include_empty=training_vars['training_empty'].get(),
                 training_augment=training_vars['training_augment'].get(),
+                # --- Cloud database upload params ---
+                cloud_db_name=cloud_db_vars['cloud_db_name'].get().strip(),
+                cloud_table_name=cloud_db_vars['cloud_table_name'].get().strip(),
+                cloud_db_config_path=cloud_db_vars['cloud_db_config_path'].get().strip(),
             )
 
             root.quit()
@@ -520,7 +535,7 @@ class ConfigManager:
 
         # Parallel videos processing
         tk.Label(frame_skip_frame, text="Parallel videos:").grid(row=1, column=0, sticky="w", padx=5, pady=4)
-        
+
         parallel_combo = ttk.Combobox(
             frame_skip_frame,
             textvariable=config_vars['max_parallel_videos'],
@@ -530,7 +545,7 @@ class ConfigManager:
         )
         parallel_combo.grid(row=1, column=1, sticky="w", padx=5, pady=4)
         parallel_combo.set("1")
-        
+
         tk.Label(frame_skip_frame, text="(higher = faster but uses more GPU memory)").grid(
             row=1, column=2, columnspan=4, sticky="w", padx=5, pady=4)
 
@@ -567,6 +582,46 @@ class ConfigManager:
         tk.Checkbutton(training_frame, text="Apply augmentation (flip, brightness)",
                        variable=training_vars['training_augment']).grid(row=5, column=0, columnspan=2, sticky="w",
                                                                         padx=5, pady=2)
+
+        # --- Cloud Database Upload (optional) ---
+        row += 1
+        cloud_frame = tk.LabelFrame(root, text="Cloud Database Upload (optional)", font=("Arial", 10, "bold"))
+        cloud_frame.grid(row=row, column=0, columnspan=3, padx=10, pady=6, sticky="ew")
+
+        def browse_db_config():
+            """Browse for database config file"""
+            filetypes = [
+                ("Config Files", "*.conf *.ini *.cfg"),
+                ("All Files", "*.*")
+            ]
+            filename = filedialog.askopenfilename(
+                title="Select Database Config File",
+                filetypes=filetypes,
+                parent=root
+            )
+            if filename:
+                cloud_db_vars['cloud_db_config_path'].set(filename)
+
+        # Database config file path
+        tk.Label(cloud_frame, text="DB Config File:").grid(row=0, column=0, sticky="w", padx=5, pady=4)
+        db_config_entry = tk.Entry(cloud_frame, textvariable=cloud_db_vars['cloud_db_config_path'], width=40)
+        db_config_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=4)
+        tk.Button(cloud_frame, text="Browse...", command=browse_db_config).grid(row=0, column=2, padx=5, pady=4)
+
+        # Database section name
+        tk.Label(cloud_frame, text="DB Section Name:").grid(row=1, column=0, sticky="w", padx=5, pady=4)
+        db_name_entry = tk.Entry(cloud_frame, textvariable=cloud_db_vars['cloud_db_name'], width=25)
+        db_name_entry.grid(row=1, column=1, sticky="w", padx=5, pady=4)
+
+        # Table name
+        tk.Label(cloud_frame, text="Table Name:").grid(row=2, column=0, sticky="w", padx=5, pady=4)
+        table_name_entry = tk.Entry(cloud_frame, textvariable=cloud_db_vars['cloud_table_name'], width=25)
+        table_name_entry.grid(row=2, column=1, sticky="w", padx=5, pady=4)
+
+        tk.Label(cloud_frame, text="(Leave all blank to skip cloud upload)", fg="gray", font=("Arial", 8)).grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=5, pady=2)
+
+        cloud_frame.columnconfigure(1, weight=1)
 
         row += 1
 
@@ -663,6 +718,11 @@ class ConfigManager:
                 training_vars['training_empty'].set(loaded_config.training_include_empty)
                 training_vars['training_augment'].set(loaded_config.training_augment)
                 
+                # Cloud database settings
+                cloud_db_vars['cloud_db_name'].set(getattr(loaded_config, 'cloud_db_name', '') or '')
+                cloud_db_vars['cloud_table_name'].set(getattr(loaded_config, 'cloud_table_name', '') or '')
+                cloud_db_vars['cloud_db_config_path'].set(getattr(loaded_config, 'cloud_db_config_path', '') or '')
+                
                 # Update field states
                 toggle_input_fields()
                 
@@ -678,7 +738,7 @@ class ConfigManager:
         button_frame = tk.Frame(root)
         button_frame.grid(row=row, column=0, columnspan=3, pady=20)
 
-        tk.Button(button_frame, text="Load Config...", command=load_existing_config, 
+        tk.Button(button_frame, text="Load Config...", command=load_existing_config,
                   width=15, bg="#2196F3", fg="white").pack(side="left", padx=10)
         tk.Button(button_frame, text="Cancel", command=cancel, width=15).pack(side="left", padx=10)
         tk.Button(button_frame, text="Continue", command=validate_and_submit,

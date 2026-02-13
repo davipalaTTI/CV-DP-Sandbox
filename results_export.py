@@ -5,6 +5,7 @@ Handles hourly segment export of event logs only:
 - Event log data per hourly segment
 - Multiple output formats (JSON, CSV, Excel)
 - Master event log that appends all events to single Excel file and JSON log
+- Optional PostgreSQL cloud upload
 - No summaries or aggregations
 
 Uses a queue-based writer for non-blocking master log updates.
@@ -13,6 +14,7 @@ Uses a queue-based writer for non-blocking master log updates.
 import json
 import csv
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Union
 from dataclasses import dataclass
@@ -23,6 +25,14 @@ import time
 from queue import Queue, Empty
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
+from configparser import ConfigParser
+
+# Try to import psycopg2 for PostgreSQL support (optional)
+try:
+    import psycopg2
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
 
 # Global lock for master log file access (shared across all ResultsExporter instances)
 _master_log_lock = threading.Lock()
@@ -41,7 +51,7 @@ class MasterLogWriter:
     """
     _instance = None
     _lock = threading.Lock()
-
+    
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
@@ -49,37 +59,39 @@ class MasterLogWriter:
                     cls._instance = super().__new__(cls)
                     cls._instance._initialized = False
         return cls._instance
-
+    
     def __init__(self):
         if self._initialized:
             return
-
+        
         self._initialized = True
         self.logger = logging.getLogger(__name__ + ".writer")
-
+        
         # Queue for pending writes
         self._write_queue = Queue()
-
-        # Queue for dwell time updates
+        
+        # Queue for dwell time updates  
         self._dwell_queue = Queue()
-
+        
         # Writer thread
         self._writer_thread = None
         self._stop_event = threading.Event()
-
+        
         # Batch settings
-        self._batch_interval = 5.0  # Write batches every 5 seconds
+        self._batch_interval = 300.0  # Write batches every 5 minutes
         self._max_batch_size = 500  # Or when batch reaches this size
-
-        # Track master log path (set by first exporter)
+        
+        # Track master log paths (set by first exporter)
         self._master_log_path = None
-
-    def set_master_log_path(self, path: Path):
-        """Set the master log path (called by ResultsExporter)"""
+        self._master_json_path = None
+        
+    def set_master_log_path(self, path: Path, json_path: Path = None):
+        """Set the master log paths (called by ResultsExporter)"""
         if self._master_log_path is None:
             self._master_log_path = path
+            self._master_json_path = json_path
             self._start_writer()
-
+    
     def _start_writer(self):
         """Start the background writer thread"""
         if self._writer_thread is None or not self._writer_thread.is_alive():
@@ -91,7 +103,7 @@ class MasterLogWriter:
             )
             self._writer_thread.start()
             self.logger.info("Master log writer thread started")
-
+    
     def queue_events(self, events: List[Dict], video_source: str, segment_id: str):
         """
         Queue events for writing (NON-BLOCKING).
@@ -104,7 +116,7 @@ class MasterLogWriter:
                 'segment_id': segment_id,
                 'timestamp': time.time()
             })
-
+    
     def queue_dwell_update(self, updates: List[Dict], video_source: str):
         """Queue dwell time updates (NON-BLOCKING)"""
         if updates:
@@ -113,51 +125,52 @@ class MasterLogWriter:
                 'video_source': video_source,
                 'timestamp': time.time()
             })
-
+    
     def _writer_loop(self):
         """Background thread that processes queued writes"""
         self.logger.info("Writer loop started")
-
+        
         while not self._stop_event.is_set():
             try:
                 # Collect batch of events
                 batch_events = []
                 batch_start = time.time()
-
+                
                 # Collect events until batch interval or max size
-                while (time.time() - batch_start < self._batch_interval and
+                while (time.time() - batch_start < self._batch_interval and 
                        len(batch_events) < self._max_batch_size):
                     try:
                         item = self._write_queue.get(timeout=0.5)
                         batch_events.append(item)
                     except Empty:
                         pass
-
+                    
                     if self._stop_event.is_set():
                         break
-
+                
                 # Write batch if we have events
                 if batch_events:
                     self._write_batch(batch_events)
-
+                
                 # Process dwell updates (less frequently)
                 self._process_dwell_updates()
-
+                
             except Exception as e:
                 self.logger.error(f"Writer loop error: {e}")
                 time.sleep(1)
-
+        
         # Flush remaining on shutdown
         self._flush_all()
         self.logger.info("Writer loop stopped")
-
+    
     def _write_batch(self, batch_items: List[Dict]):
-        """Write a batch of events to the master log"""
+        """Write a batch of events to both the Excel and JSON master logs"""
         if not self._master_log_path or not batch_items:
             return
-
-        # Prepare all rows
+        
+        # Prepare all rows and JSON entries
         all_rows = []
+        json_entries = []
         for item in batch_items:
             for event in item['events']:
                 event_type = 'line_crossing' if 'line_name' in event else 'zone_entry' if 'zone_name' in event else 'unknown'
@@ -171,7 +184,7 @@ class MasterLogWriter:
                         dwell_val = ''
                 else:
                     dwell_val = ''
-
+                
                 row = (
                     event.get('actual_datetime', ''),
                     event_type,
@@ -189,18 +202,37 @@ class MasterLogWriter:
                     item['segment_id'] if item['segment_id'] is not None else ''
                 )
                 all_rows.append(row)
-
+                
+                # Also prepare JSON entry
+                json_entries.append({
+                    'actual_datetime': event.get('actual_datetime', ''),
+                    'event_type': event_type,
+                    'track_id': event.get('track_id', ''),
+                    'class_id': event.get('class_id', ''),
+                    'class_name': event.get('class_name', ''),
+                    'line_name': event.get('line_name', ''),
+                    'zone_name': event.get('zone_name', ''),
+                    'direction': event.get('direction', ''),
+                    'confidence': event.get('confidence', ''),
+                    'speed': event.get('speed', 0.0),
+                    'speed_units': event.get('speed_units', ''),
+                    'dwell_seconds': dwell_val if dwell_val != '' else None,
+                    'video_source': item['video_source'] or '',
+                    'segment_id': item['segment_id'] if item['segment_id'] is not None else ''
+                })
+        
         if not all_rows:
             return
-
-        # Write to file with lock
+        
+        # Write to files with lock
         max_retries = 3
         for attempt in range(max_retries):
             if not _master_log_lock.acquire(timeout=10):
                 self.logger.warning(f"Could not acquire lock for batch write (attempt {attempt + 1})")
                 continue
-
+            
             try:
+                # Write to Excel
                 if not self._master_log_path.exists():
                     # Create file with headers
                     df = pd.DataFrame(columns=[
@@ -210,21 +242,30 @@ class MasterLogWriter:
                         'video_source', 'segment_id'
                     ])
                     df.to_excel(self._master_log_path, sheet_name='Events', index=False, engine='openpyxl')
-
+                
                 wb = load_workbook(self._master_log_path)
                 ws = wb.active
                 current_rows = ws.max_row
-
+                
                 for row in all_rows:
                     ws.append(row)
-
+                
                 wb.save(self._master_log_path)
                 wb.close()
-
-                self.logger.info(f"Batch wrote {len(all_rows)} events to master log (total: {current_rows + len(all_rows) - 1})")
+                
+                # Write to JSON (append mode, newline-delimited JSON)
+                if self._master_json_path:
+                    try:
+                        with open(self._master_json_path, 'a') as f:
+                            for entry in json_entries:
+                                f.write(json.dumps(entry, default=str) + "\n")
+                    except Exception as json_err:
+                        self.logger.warning(f"Failed to write to JSON master log: {json_err}")
+                
+                self.logger.info(f"Batch wrote {len(all_rows)} events to master logs (total: {current_rows + len(all_rows) - 1})")
                 _master_log_lock.release()
                 return
-
+                
             except PermissionError:
                 self.logger.warning("Permission error, retrying...")
                 _master_log_lock.release()
@@ -233,13 +274,13 @@ class MasterLogWriter:
                 self.logger.error(f"Batch write failed: {e}")
                 _master_log_lock.release()
                 return
-
+        
         self.logger.error("Failed to write batch after retries")
-
+    
     def _process_dwell_updates(self):
         """Process queued dwell time updates"""
         updates_by_source = {}
-
+        
         # Collect all pending updates
         while True:
             try:
@@ -250,64 +291,64 @@ class MasterLogWriter:
                 updates_by_source[source].extend(item['updates'])
             except Empty:
                 break
-
+        
         if not updates_by_source:
             return
-
+        
         # Apply updates (this still needs read-modify-write unfortunately)
         if not _master_log_lock.acquire(timeout=5):
             # Re-queue for next cycle
             for source, updates in updates_by_source.items():
                 self._dwell_queue.put({'updates': updates, 'video_source': source, 'timestamp': time.time()})
             return
-
+        
         try:
             if not self._master_log_path or not self._master_log_path.exists():
                 return
-
+            
             df = pd.read_excel(self._master_log_path, sheet_name='Events', engine='openpyxl')
             if df.empty:
                 return
-
+            
             updates_made = 0
             for source, updates in updates_by_source.items():
                 for update in updates:
                     track_id = update.get('track_id')
                     zone_name = update.get('zone_name')
                     new_dwell = update.get('dwell_seconds', 0.0)
-
+                    
                     if not track_id or not zone_name:
                         continue
-
+                    
                     try:
                         dwell = float(new_dwell) if new_dwell is not None else 0.0
                         if dwell < 0 or dwell > 86400:
                             continue
                     except:
                         continue
-
+                    
                     mask = (
-                        (df['track_id'] == track_id) &
+                        (df['track_id'] == track_id) & 
                         (df['zone_name'] == zone_name) &
                         (df['event_type'] == 'zone_entry')
                     )
                     if source:
                         mask = mask & (df['video_source'] == source)
-
+                    
                     if mask.any():
                         df.loc[mask, 'dwell_seconds'] = dwell
                         updates_made += 1
-
+            
             if updates_made > 0:
                 with pd.ExcelWriter(self._master_log_path, engine='openpyxl', mode='w') as writer:
                     df.to_excel(writer, sheet_name='Events', index=False)
                 self.logger.debug(f"Updated dwell times for {updates_made} events")
-
+        
         except Exception as e:
             self.logger.error(f"Dwell update failed: {e}")
         finally:
             _master_log_lock.release()
-
+    
     def _flush_all(self):
         """Flush all remaining events on shutdown"""
         # Collect all remaining events
@@ -317,25 +358,25 @@ class MasterLogWriter:
                 remaining.append(self._write_queue.get_nowait())
             except Empty:
                 break
-
+        
         if remaining:
             self._write_batch(remaining)
-
+        
         # Process remaining dwell updates
         self._process_dwell_updates()
-
+    
     def flush_and_wait(self, timeout: float = 10.0):
         """Force flush and wait for completion (call at end of processing)"""
         # Signal we want to flush
         flush_complete = threading.Event()
-
+        
         def flush_task():
             self._flush_all()
             flush_complete.set()
-
+        
         threading.Thread(target=flush_task, daemon=True).start()
         flush_complete.wait(timeout=timeout)
-
+    
     def stop(self):
         """Stop the writer thread"""
         self._stop_event.set()
@@ -358,6 +399,10 @@ def get_master_log_writer() -> MasterLogWriter:
 class ExportConfig:
     export_formats: List[str] = None  # ['json', 'csv', 'excel']
     enable_master_log: bool = True  # Enable master event log
+    # PostgreSQL cloud upload settings (optional - leave blank to skip cloud upload)
+    cloud_db_name: str = ""  # Database section name (e.g., 'cv-database')
+    cloud_table_name: str = ""  # Target table name for uploads
+    cloud_db_config_path: str = ""  # Path to database config file
 
     def __post_init__(self):
         if self.export_formats is None:
@@ -387,7 +432,7 @@ class ResultsExporter:
             self._initialize_master_log()
             # Register with the global queue-based writer
             writer = get_master_log_writer()
-            writer.set_master_log_path(self.master_log_path)
+            writer.set_master_log_path(self.master_log_path, self.master_json_path)
 
         self.logger.info(f"Results exporter initialized: {self.output_folder}")
         if self.config.enable_master_log:
@@ -416,6 +461,7 @@ class ResultsExporter:
         Queue events for appending to master log (NON-BLOCKING).
 
         Events are queued and written in batches by a background thread.
+        Both Excel and JSON master logs are updated at the same frequency.
         This allows workers to continue processing without waiting for file I/O.
 
         Args:
@@ -428,33 +474,6 @@ class ResultsExporter:
 
         # Queue events for background writing (non-blocking)
         import copy
-
-        try:
-            with open(self.master_json_path, 'a') as f:
-                for event in event_list:
-                    # Create a copy and add the metadata fields
-                    json_entry = {
-                        'actual_datetime': event.get('actual_datetime', ''),
-                        'event_type': 'line_crossing' if 'line_name' in event and event['line_name'] else
-                        'zone_entry' if 'zone_name' in event and event['zone_name'] else 'unknown',
-                        'track_id': event.get('track_id', ''),
-                        'class_id': event.get('class_id', ''),
-                        'class_name': event.get('class_name', ''),
-                        'line_name': event.get('line_name', ''),
-                        'zone_name': event.get('zone_name', ''),
-                        'direction': event.get('direction', ''),
-                        'confidence': event.get('confidence', ''),
-                        'speed': event.get('speed', 0.0),
-                        'speed_units': event.get('speed_units', ''),
-                        'dwell_seconds': self._sanitize_dwell_time(event.get('dwell_seconds', 0.0)),
-                        'video_source': video_source or '',
-                        'segment_id': str(segment_id) if segment_id is not None else ''
-                    }
-
-                    f.write(json.dumps(json_entry, default=str) + "\n")
-        except Exception as e:
-            self.logger.error(f"Failed to append event to master log: {e}")
-
         events_copy = copy.deepcopy(event_list)
 
         writer = get_master_log_writer()
@@ -470,28 +489,28 @@ class ResultsExporter:
         """
         Queue dwell time updates for zone events (NON-BLOCKING).
         Updates are processed by the background writer thread.
-
+        
         Args:
             zone_updates: List of dicts with 'track_id', 'zone_name', 'dwell_seconds'
             video_source: Video source to match (for uniqueness)
         """
         if not self.config.enable_master_log or not zone_updates:
             return
-
+        
         # Queue updates for background processing (non-blocking)
         import copy
         updates_copy = copy.deepcopy(zone_updates)
-
+        
         writer = get_master_log_writer()
         writer.queue_dwell_update(updates_copy, video_source or '')
-
+        
         self.logger.debug(f"Queued {len(zone_updates)} dwell updates for master log")
 
     def _sanitize_dwell_time(self, dwell_value, min_dwell: float = 0.3) -> Optional[float]:
         """
         Validate and sanitize dwell time values.
         Returns None for invalid values (negative, below minimum, or unreasonably large).
-
+        
         Args:
             dwell_value: Raw dwell time value
             min_dwell: Minimum dwell time threshold (default 0.3 seconds)
@@ -513,14 +532,14 @@ class ResultsExporter:
                        source_name: str = None) -> Dict[str, str]:
         """
         Export a segment of events - convenience wrapper for VideoWorker
-
+        
         Args:
             events_list: List of CountingEvent objects or event dictionaries
             segment_id: Segment identifier
             start_dt: Segment start datetime
             end_dt: Segment end datetime
             source_name: Optional source video filename
-
+            
         Returns:
             Dictionary of exported file paths
         """
@@ -560,18 +579,18 @@ class ResultsExporter:
                     'speed': getattr(evt, 'avg_speed', 0.0),
                     'speed_units': getattr(evt, 'speed_units', ''),
                     'dwell_seconds': dwell,
-                    'actual_datetime': getattr(evt, 'actual_datetime', '').isoformat()
-                        if hasattr(getattr(evt, 'actual_datetime', ''), 'isoformat')
+                    'actual_datetime': getattr(evt, 'actual_datetime', '').isoformat() 
+                        if hasattr(getattr(evt, 'actual_datetime', ''), 'isoformat') 
                         else str(getattr(evt, 'actual_datetime', ''))
                 })
-
+        
         # Build the events dictionary in the format expected by export_segment_results
         events_dict = {
             'events': event_dicts,
             '_window_start': start_dt.isoformat() if start_dt else datetime.datetime.now().isoformat(),
             '_window_end': end_dt.isoformat() if end_dt else datetime.datetime.now().isoformat()
         }
-
+        
         return self.export_segment_results(
             segment_id=segment_id,
             counts={},  # Not used in simplified version
@@ -583,11 +602,11 @@ class ResultsExporter:
     def export_video_summary(self, results: Dict, video_name: str = None) -> Dict[str, str]:
         """
         Export summary for a single video - convenience wrapper for VideoWorker
-
+        
         Args:
             results: Dictionary with 'final_counts', 'events_summary', 'stats' keys
             video_name: Name of the video file
-
+            
         Returns:
             Dictionary of exported file paths
         """
@@ -595,16 +614,16 @@ class ResultsExporter:
             exported_files = {}
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             prefix = f"{video_name}_" if video_name else ""
-
+            
             # Create summaries folder
             summaries_folder = self.output_folder / "summaries"
             summaries_folder.mkdir(parents=True, exist_ok=True)
-
+            
             # Export as JSON
             if 'json' in self.config.export_formats:
                 filename = f"{prefix}summary_{timestamp}.json"
                 filepath = summaries_folder / filename
-
+                
                 # Build summary data
                 summary_data = {
                     'video_name': video_name,
@@ -613,7 +632,7 @@ class ResultsExporter:
                     'events_summary': results.get('events_summary', {}),
                     'stats': {}
                 }
-
+                
                 # Handle ProcessingStats dataclass
                 stats = results.get('stats')
                 if stats:
@@ -624,23 +643,141 @@ class ResultsExporter:
                         summary_data['stats'] = vars(stats)
                     elif isinstance(stats, dict):
                         summary_data['stats'] = stats
-
+                
                 with open(filepath, 'w') as f:
                     json.dump(summary_data, f, indent=2, default=str)
-
+                
                 exported_files['summary_json'] = str(filepath)
                 self.logger.info(f"Video summary exported: {filepath}")
-
+            
             return exported_files
-
+            
         except Exception as e:
             self.logger.error(f"Failed to export video summary: {e}")
             return {}
 
+    # ========================================================================
+    # PostgreSQL Cloud Upload Helper Methods
+    # ========================================================================
+
+    def _load_db_config(self, section: str) -> Dict[str, str]:
+        """
+        Load database connection parameters from config file.
+        
+        Args:
+            section: Section name in the config file (e.g., 'cv-database')
+            
+        Returns:
+            Dictionary of connection parameters
+            
+        Raises:
+            Exception: If section not found in config file
+        """
+        config_path = self.config.cloud_db_config_path
+        parser = ConfigParser()
+        parser.read(config_path)
+        
+        db_params = {}
+        if parser.has_section(section):
+            params = parser.items(section)
+            for param in params:
+                db_params[param[0]] = param[1]
+        else:
+            raise Exception(f'Section {section} not found in the {config_path} file')
+        
+        return db_params
+
+    def _upload_to_cloud_db(self, db_section: str, table_name: str, rows: List[Dict]) -> bool:
+        """
+        Insert rows into PostgreSQL database.
+        
+        Args:
+            db_section: Database section name in config file
+            table_name: Target table name
+            rows: List of dictionaries representing rows to insert
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not PSYCOPG2_AVAILABLE:
+            self.logger.warning("psycopg2 not installed - skipping cloud upload")
+            return False
+        
+        if not rows:
+            self.logger.debug("No rows to upload to cloud database")
+            return True
+        
+        conn = None
+        cursor = None
+        try:
+            params = self._load_db_config(section=db_section)
+            conn = psycopg2.connect(**params)
+            cursor = conn.cursor()
+            
+            for row in rows:
+                columns = ', '.join(row.keys())
+                values = ', '.join(['%s'] * len(row))
+                query = f"INSERT INTO {table_name} ({columns}) VALUES ({values})"
+                cursor.execute(query, list(row.values()))
+            
+            conn.commit()
+            self.logger.info(f"Cloud upload successful: {len(rows)} rows inserted into {table_name}")
+            return True
+            
+        except Exception as error:
+            self.logger.error(f"Error uploading to PostgreSQL: {error}")
+            return False
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+                self.logger.debug("PostgreSQL connection closed")
+
+    def _prepare_events_for_cloud(self, event_list: List[Dict]) -> List[Dict]:
+        """
+        Prepare event data for cloud upload by dropping/renaming columns and rounding values.
+        
+        Args:
+            event_list: List of event dictionaries
+            
+        Returns:
+            List of cleaned/transformed event dictionaries for cloud upload
+        """
+        if not event_list:
+            return []
+        
+        # Convert to DataFrame for easier manipulation
+        cloud_df = pd.DataFrame(event_list)
+        
+        # Columns to drop for cloud upload (timestamp is separate from actual_datetime)
+        cloud_drop_cols = ["event_id", "class_id", "speed_units", "segment_id", "confidence", 
+                           "timestamp", "position"]
+        cloud_df = cloud_df.drop(columns=[c for c in cloud_drop_cols if c in cloud_df.columns])
+        
+        # Rename columns for cloud schema
+        cloud_rename_map = {"actual_datetime": "time", "speed": "speed_mph"}
+        cloud_df = cloud_df.rename(columns=cloud_rename_map)
+        
+        # Round and convert numeric columns
+        if "speed_mph" in cloud_df.columns:
+            cloud_df["speed_mph"] = cloud_df["speed_mph"].round().astype("Int64")
+        if "track_id" in cloud_df.columns:
+            cloud_df["track_id"] = pd.to_numeric(cloud_df["track_id"], errors='coerce').round().astype("Int64")
+        if "dwell_seconds" in cloud_df.columns:
+            cloud_df["dwell_seconds"] = np.ceil(pd.to_numeric(cloud_df["dwell_seconds"], errors='coerce')).astype("Int64")
+        
+        return cloud_df.to_dict(orient="records")
+
+    # ========================================================================
+    # Segment Export Methods
+    # ========================================================================
+
     def export_segment_results(self, segment_id: Union[int, str], counts: Dict, events: Dict, stats: Any,
                               video_source: str = None) -> Dict[str, str]:
         """
-        Export event log for a single hourly segment
+        Export event log for a single hourly segment.
+        Exports locally first, then uploads to cloud if configured.
 
         Args:
             segment_id: Segment identifier
@@ -697,6 +834,30 @@ class ResultsExporter:
                 exported_files['excel'] = str(excel_path)
 
             self.logger.info(f"Segment {segment_id} event log exported to {len(exported_files)} format(s)")
+
+            # ================================================================
+            # Cloud Upload Section (after local export)
+            # Only upload if db name, table name, and config path are all configured
+            # ================================================================
+            if (self.config.cloud_db_name and self.config.cloud_table_name 
+                and self.config.cloud_db_config_path):
+                try:
+                    # Prepare events for cloud upload (drop/rename columns, round values)
+                    cloud_records = self._prepare_events_for_cloud(event_list)
+                    
+                    # Upload to cloud database
+                    upload_success = self._upload_to_cloud_db(
+                        db_section=self.config.cloud_db_name,
+                        table_name=self.config.cloud_table_name,
+                        rows=cloud_records
+                    )
+                    
+                    if upload_success:
+                        exported_files['cloud_db'] = f"{self.config.cloud_db_name}:{self.config.cloud_table_name}"
+                except Exception as cloud_error:
+                    self.logger.error(f"Cloud upload failed for segment {segment_id}: {cloud_error}")
+                    # Continue without failing - local export already succeeded
+
             return exported_files
 
         except Exception as e:
@@ -839,15 +1000,15 @@ class ResultsExporter:
                         video_source = video_result.get('video_path', '')
                         if video_source:
                             video_source = Path(video_source).name
-
+                        
                         events_summary = video_result.get('events_summary', {})
                         video_events = events_summary.get('events', [])
-
+                        
                         # Tag each event with video source if not already present
                         for evt in video_events:
                             if isinstance(evt, dict) and not evt.get('video_source'):
                                 evt['video_source'] = video_source
-
+                        
                         all_events.extend(video_events)
             elif 'events_summary' in results:
                 # Single video/camera processing
@@ -900,7 +1061,7 @@ class ResultsExporter:
                 # Convert to DataFrame with consistent column order
                 df = pd.DataFrame(standardized_events)
                 df = self._reorder_columns(df)
-
+                
                 with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
                     df.to_excel(writer, sheet_name='All_Events', index=False)
 
@@ -923,7 +1084,7 @@ class ResultsExporter:
     def _standardize_event_fields(self, event: Dict) -> Dict:
         """
         Standardize event dictionary to have consistent fields in consistent order.
-
+        
         Standard fields: actual_datetime, event_type, track_id, class_id, class_name,
                         line_name, zone_name, direction, confidence, speed, speed_units,
                         dwell_seconds, video_source, segment_id
@@ -935,7 +1096,7 @@ class ResultsExporter:
             event_type = 'zone_entry'
         else:
             event_type = event.get('event_type', 'unknown')
-
+        
         return {
             'actual_datetime': event.get('actual_datetime', ''),
             'event_type': event_type,
@@ -956,7 +1117,7 @@ class ResultsExporter:
     def _reorder_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Reorder DataFrame columns to standard order, adding missing columns as empty.
-
+        
         Standard order: actual_datetime, event_type, track_id, class_id, class_name,
                        line_name, zone_name, direction, confidence, speed, speed_units,
                        dwell_seconds, video_source, segment_id
@@ -966,16 +1127,16 @@ class ResultsExporter:
             'line_name', 'zone_name', 'direction', 'confidence', 'speed', 'speed_units',
             'dwell_seconds', 'video_source', 'segment_id'
         ]
-
+        
         # Add missing columns with empty values
         for col in standard_columns:
             if col not in df.columns:
                 df[col] = ''
-
+        
         # Reorder to standard order, keeping any extra columns at the end
         extra_columns = [col for col in df.columns if col not in standard_columns]
         ordered_columns = standard_columns + extra_columns
-
+        
         return df[ordered_columns]
 
     def export_live_stats(self, stats_data: Dict) -> str:

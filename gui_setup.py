@@ -92,12 +92,6 @@ class InteractiveGUI:
                 "color": (0, 0, 255),
                 "text_color": (255, 255, 255)
             },
-            "finish_zone": {
-                "rect": (410, 10, 500, 50),
-                "text": "Finish Zone",
-                "color": (255, 165, 0),
-                "text_color": (255, 255, 255)
-            },
             "confirm": {
                 "rect": (210, 10, 300, 50),
                 "text": "Confirm",
@@ -119,6 +113,12 @@ class InteractiveGUI:
                     "text": "Zone",
                     "color": (255, 255, 0),
                     "text_color": (0, 0, 0)
+                },
+                "finish_zone": {
+                    "rect": (410, 10, 500, 50),
+                    "text": "Finish Zone",
+                    "color": (255, 165, 0),
+                    "text_color": (255, 255, 255)
                 }
             })
 
@@ -157,6 +157,10 @@ class InteractiveGUI:
         finally:
             self._cleanup()
 
+    # Supported video extensions
+    VIDEO_EXTENSIONS = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv', '*.flv', 
+                        '*.MP4', '*.AVI', '*.MOV', '*.MKV', '*.WMV', '*.FLV']
+
     def _load_preview_frame(self) -> bool:
         """Load the first frame for preview"""
         try:
@@ -165,7 +169,11 @@ class InteractiveGUI:
             else:
                 # Find first video file
                 if self.config.input_type.value == "folder":
-                    video_files = list(Path(self.config.input_source).glob("*.mp4"))
+                    video_files = []
+                    folder_path = Path(self.config.input_source)
+                    for ext in self.VIDEO_EXTENSIONS:
+                        video_files.extend(folder_path.glob(ext))
+                    video_files.sort(key=lambda x: x.name)  # Sort by name for consistency
                     if not video_files:
                         self.logger.error("No video files found in input folder")
                         return False
@@ -277,7 +285,7 @@ class InteractiveGUI:
             self.state.current_line.clear()
             self.state.current_zone.clear()
 
-        elif button_name == "finish_zone" and self.config.enable_zones or button_name == "finish_zone" and self.state.selection_mode == "exclusion":
+        elif button_name == "finish_zone" and self.config.enable_zones:
             self._finish_current_zone()
 
         elif button_name == "confirm":

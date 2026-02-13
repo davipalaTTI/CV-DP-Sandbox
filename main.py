@@ -125,7 +125,7 @@ class Application:
 
                 # Check if user loaded a complete config and wants to skip GUI setup
                 skip_interactive = getattr(self.config, '_skip_gui_setup', False)
-
+                
                 if skip_interactive and self.config.lines_config:
                     self.logger.info("Using loaded configuration (skipping interactive setup)")
                 else:

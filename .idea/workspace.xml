@@ -4,10 +4,15 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="Trase Updated Files&#10;2 5 2026 TH">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    <list default="true" id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="David Updated Files&#10;2 10 2026 DP">
+      <change beforePath="$PROJECT_DIR$/config_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/config_manager.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/counter_logic.py" beforeDir="false" afterPath="$PROJECT_DIR$/counter_logic.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/detection_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/detection_engine.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui_setup.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui_setup.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/progress_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/progress_window.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/results_export.py" beforeDir="false" afterPath="$PROJECT_DIR$/results_export.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/video_processor.py" beforeDir="false" afterPath="$PROJECT_DIR$/video_processor.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -184,7 +189,15 @@
       <option name="project" value="LOCAL" />
       <updated>1770672032035</updated>
     </task>
-    <option name="localTasksCounter" value="10" />
+    <task id="LOCAL-00010" summary="David Updated Files&#10;2 10 2026 DP">
+      <option name="closed" value="true" />
+      <created>1771010013578</created>
+      <option name="number" value="00010" />
+      <option name="presentableId" value="LOCAL-00010" />
+      <option name="project" value="LOCAL" />
+      <updated>1771010013578</updated>
+    </task>
+    <option name="localTasksCounter" value="11" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -203,7 +216,8 @@
     <MESSAGE value="Trase Updated Files&#10;1 5 2026 TH" />
     <MESSAGE value="David Updated Files&#10;1 29 2026 DP" />
     <MESSAGE value="Trase Updated Files&#10;2 5 2026 TH" />
-    <option name="LAST_COMMIT_MESSAGE" value="Trase Updated Files&#10;2 5 2026 TH" />
+    <MESSAGE value="David Updated Files&#10;2 10 2026 DP" />
+    <option name="LAST_COMMIT_MESSAGE" value="David Updated Files&#10;2 10 2026 DP" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>

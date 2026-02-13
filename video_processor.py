@@ -29,7 +29,7 @@ import sys
 from config_manager import AppConfig
 from detection_engine import DetectionEngine, Detection
 from counter_logic import ObjectCounter, CountingEvent
-from results_export import ResultsExporter
+from results_export import ResultsExporter, ExportConfig
 from gui_setup import LinePropertiesDialog, ZonePropertiesDialog
 from config_manager import CountingLine, CountingZone
 import tkinter as tk
@@ -69,13 +69,13 @@ class VideoWorker:
     to avoid shared state issues during concurrent processing.
     """
 
-    def __init__(self, config: 'AppConfig', video_path: Path, worker_id: int,
+    def __init__(self, config: 'AppConfig', video_path: Path, worker_id: int, 
                  queue_size_callback=None):
         self.config = config
         self.video_path = video_path
         self.worker_id = worker_id
         self.logger = logging.getLogger(f"{__name__}.worker_{worker_id}")
-
+        
         # Callback to get video queue size (for extended stability wait when queue <= 1)
         self.queue_size_callback = queue_size_callback
 
@@ -106,8 +106,13 @@ class VideoWorker:
             annotate=bool(getattr(config, "annotate_speed", True))
         )
 
-        # Each worker gets its own exporter
-        self.exporter = ResultsExporter(config.output_folder)
+        # Each worker gets its own exporter (with cloud upload settings from AppConfig)
+        export_config = ExportConfig(
+            cloud_db_name=getattr(config, 'cloud_db_name', '') or '',
+            cloud_table_name=getattr(config, 'cloud_table_name', '') or '',
+            cloud_db_config_path=getattr(config, 'cloud_db_config_path', '') or ''
+        )
+        self.exporter = ResultsExporter(config.output_folder, export_config)
 
         # Worker state
         self.cap = None
@@ -134,7 +139,7 @@ class VideoWorker:
         self.live_export_interval = 300.0  # Update Excel every 5 minutes
         self.last_live_export_time = time.time()
         self.last_exported_event_count = 0
-
+        
         # Track active zone events that need dwell time updates
         # Key: (track_id, zone_name), Value: True if still active (object in zone)
         self.active_zone_events = {}
@@ -157,20 +162,20 @@ class VideoWorker:
 
         try:
             wait_for_growing = getattr(self.config, 'wait_for_growing_files', True)
-
+            
             # For growing files: Wait for valid container headers before starting
             # This prevents "EBML header parsing failed" errors on freshly created files
             if wait_for_growing:
                 max_header_wait = 60  # Max 60 seconds to wait for valid headers
                 header_wait_start = time.time()
                 last_size_for_header_check = 0
-
+                
                 while time.time() - header_wait_start < max_header_wait:
                     try:
                         current_size = self.video_path.stat().st_size
                     except:
                         break  # File doesn't exist
-
+                    
                     # Try to open and check if headers are valid
                     test_cap = cv2.VideoCapture(str(self.video_path))
                     if test_cap.isOpened():
@@ -179,7 +184,7 @@ class VideoWorker:
                         # Try to actually read a frame to confirm headers are valid
                         ret, _ = test_cap.read()
                         test_cap.release()
-
+                        
                         if frame_count > 0 and fps > 0 and ret:
                             self.logger.debug(f"Worker {self.worker_id}: Container valid ({frame_count} frames, {fps} fps)")
                             break
@@ -197,7 +202,7 @@ class VideoWorker:
                         time.sleep(2.0)
                 else:
                     self.logger.warning(f"Worker {self.worker_id}: Timed out waiting for valid container headers")
-
+            
             # Initialize video capture
             if not self._initialize_video():
                 return {"error": f"Failed to open video: {self.video_path}", "video_path": str(self.video_path)}
@@ -258,7 +263,7 @@ class VideoWorker:
             fps_update_interval = 30  # Update FPS every N frames
             fps_frame_times = deque(maxlen=fps_update_interval)  # Use deque for O(1) operations
             last_fps_time = time.time()
-
+            
             # File stability tracking for growing files
             # Use 10s when other videos in queue, 30s when queue is empty (no more work)
             stability_required_seconds_default = 10.0
@@ -266,12 +271,12 @@ class VideoWorker:
             last_file_size = self.video_path.stat().st_size
             file_stable_since = time.time()
             # wait_for_growing already defined at start of process()
-
+            
             # Buffer to stay behind live edge (avoid reading incomplete data)
             # This prevents "File ended prematurely" FFmpeg errors
             live_edge_buffer_frames = int(self.video_fps * 3)  # Stay 3 seconds behind live edge
             consecutive_read_failures = 0
-
+            
             # Track waiting state for progress display
             waiting_until_recheck = 0.0  # Seconds until next recheck (0 = not waiting)
 
@@ -282,7 +287,7 @@ class VideoWorker:
                 ret, frame = self.cap.read()
                 if not ret:
                     consecutive_read_failures += 1
-
+                    
                     # Reached end of currently available frames
                     # Check if file is still growing (being recorded)
                     if wait_for_growing:
@@ -290,19 +295,19 @@ class VideoWorker:
                             current_size = self.video_path.stat().st_size
                         except:
                             break  # File disappeared, exit
-
+                        
                         if current_size > last_file_size:
                             # File is still growing - reset stable timer, reopen and continue
                             self.logger.info(f"Worker {self.worker_id}: File growing ({last_file_size} -> {current_size}), continuing...")
                             last_file_size = current_size
                             file_stable_since = time.time()
-
+                            
                             # Wait proportionally longer based on consecutive failures
                             # This gives time for more complete data to be written
                             wait_time = min(2.0 + (consecutive_read_failures * 1.0), 5.0)
                             self.logger.debug(f"Worker {self.worker_id}: Waiting {wait_time:.1f}s for more data to be written...")
                             time.sleep(wait_time)
-
+                            
                             # Reopen video at current position to read new frames
                             current_pos = self.video_frame_number
                             self.cap.release()
@@ -310,14 +315,14 @@ class VideoWorker:
                             if self.cap.isOpened():
                                 # Get new frame count
                                 new_total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
+                                
                                 # Stay behind live edge to avoid reading incomplete container data
                                 safe_max_frame = max(0, new_total_frames - live_edge_buffer_frames)
-
+                                
                                 # Always seek to current position first
                                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
                                 total_frames = new_total_frames
-
+                                
                                 # Only continue if there are new frames to process
                                 if safe_max_frame > current_pos:
                                     continue  # Try to read more frames
@@ -338,13 +343,13 @@ class VideoWorker:
                             # Use extended stability time (30s) if queue has 0 or 1 videos
                             queue_size = self.queue_size_callback() if self.queue_size_callback else 0
                             stability_required_seconds = (
-                                stability_required_seconds_extended if queue_size <= 1
+                                stability_required_seconds_extended if queue_size <= 1 
                                 else stability_required_seconds_default
                             )
-
+                            
                             stable_duration = time.time() - file_stable_since
                             remaining_wait = stability_required_seconds - stable_duration
-
+                            
                             if stable_duration >= stability_required_seconds:
                                 # File has been stable for required time, truly finished
                                 self.logger.info(f"Worker {self.worker_id}: File stable for {stable_duration:.1f}s, finishing")
@@ -352,14 +357,14 @@ class VideoWorker:
                             else:
                                 # Wait a bit and try again
                                 self.logger.debug(f"Worker {self.worker_id}: Caught up, waiting for more content ({stable_duration:.1f}s/{stability_required_seconds}s)...")
-
+                                
                                 # Continue live exports while waiting
                                 self._trigger_live_export(force=False)
-
+                                
                                 # Calculate wait time until next recheck
                                 wait_time = min(2.0 + (consecutive_read_failures * 0.5), 5.0)
                                 waiting_until_recheck = wait_time
-
+                                
                                 # Update progress to show we're caught up with waiting info
                                 if progress_callback:
                                     progress_callback(
@@ -371,24 +376,24 @@ class VideoWorker:
                                         waiting_until_recheck,  # Seconds until next recheck
                                         remaining_wait  # Seconds until stability timeout
                                     )
-
+                                
                                 time.sleep(wait_time)
                                 waiting_until_recheck = 0.0  # Reset after sleep
-
+                                
                                 # Reopen to check for new frames
                                 current_pos = self.video_frame_number
                                 self.cap.release()
                                 self.cap = cv2.VideoCapture(str(self.video_path))
                                 if self.cap.isOpened():
                                     new_total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
+                                    
                                     # Stay behind live edge
                                     safe_max_frame = max(0, new_total_frames - live_edge_buffer_frames)
-
+                                    
                                     # Always seek to maintain position
                                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
                                     total_frames = new_total_frames
-
+                                    
                                     if safe_max_frame <= current_pos:
                                         # Still too close to live edge, wait more
                                         self.cap.release()
@@ -401,7 +406,7 @@ class VideoWorker:
                                     break
                     else:
                         break  # Not waiting for growing files, exit normally
-
+                
                 # Successful read - reset failure counter
                 consecutive_read_failures = 0
 
@@ -448,21 +453,21 @@ class VideoWorker:
                     if file_size > 1024:  # File has content (> 1KB)
                         self.logger.warning(f"Worker {self.worker_id}: Processed 0 frames from {file_size} byte file - retrying after delay...")
                         time.sleep(5.0)  # Wait for more data
-
+                        
                         # Retry by reopening
                         self._cleanup()
                         if self._initialize_video():
                             self.stats.frames_processed = 0
                             self.stats.start_time = time.time()
                             self._reset_segment()
-
+                            
                             # Re-run the main loop (recursive call with retry limit)
                             # For simplicity, just log the issue - the file will be reprocessed
                             # if it's still in the folder on next scan
                             self.logger.warning(f"Worker {self.worker_id}: Zero frames processed - file may need reprocessing")
                 except:
                     pass  # File might have been deleted
-
+            
             # Finalize
             self._finalize_segment()
             self.stats.processing_time = time.time() - self.stats.start_time
@@ -605,11 +610,11 @@ class VideoWorker:
         # Force final live export before segment finalize
         # This appends any remaining events to master_log with proper tracking
         self._trigger_live_export(force=True)
-
+        
         if self.segment_events:
             try:
                 segment_end_dt = self.video_current_time or datetime.now()
-
+                
                 # Disable master_log export here since _trigger_live_export already handled it
                 # (prevents duplicate entries in master_log)
                 original_master_setting = self.exporter.config.enable_master_log
@@ -631,7 +636,7 @@ class VideoWorker:
         """
         Check if we should export new events to master_log.
         Called periodically during processing to keep master_log updated in real-time.
-
+        
         For zone events:
         - New zone events are appended immediately
         - Dwell times are updated periodically while object is in zone
@@ -643,7 +648,7 @@ class VideoWorker:
         if force or (now - self.last_live_export_time >= self.live_export_interval):
             # Update events with current video time before getting summary
             self.counter.update_events_with_final_stats(self.video_current_time)
-
+            
             # Get all events currently in memory (pass video time for accurate dwell calculation)
             summary = self.counter.get_events_summary(self.video_current_time)
             all_events = summary.get('events', [])
@@ -656,13 +661,13 @@ class VideoWorker:
             # STEP 1: Append NEW events (both line and zone)
             if current_total > self.last_exported_event_count:
                 new_events_slice = all_events[self.last_exported_event_count:]
-
+                
                 # Track new zone events for future dwell updates
                 for event in new_events_slice:
                     if event.get('zone_name'):
                         key = (event.get('track_id'), event.get('zone_name'))
                         self.active_zone_events[key] = True
-
+                
                 # Append all new events to master log
                 try:
                     self.exporter._append_to_master_log(
@@ -672,47 +677,47 @@ class VideoWorker:
                     )
                 except Exception as e:
                     self.logger.warning(f"Live master log append failed: {e}")
-
+                
                 self.last_exported_event_count = current_total
 
             # STEP 2: Update dwell times for active zone events
             if self.active_zone_events:
                 zone_updates = []
                 keys_to_remove = []
-
+                
                 for (track_id, zone_name), is_active in self.active_zone_events.items():
                     if not is_active:
                         continue
-
+                    
                     # Find the event in all_events to get current dwell
                     for event in all_events:
                         if event.get('track_id') == track_id and event.get('zone_name') == zone_name:
                             dwell = event.get('dwell_seconds', 0.0)
-
+                            
                             # Check if object is still in zone
                             obj_state = self.counter.object_states.get(track_id)
                             still_in_zone = False
                             if obj_state:
                                 still_in_zone = obj_state.zone_presence.get(zone_name, False)
-
+                            
                             zone_updates.append({
                                 'track_id': track_id,
                                 'zone_name': zone_name,
                                 'dwell_seconds': dwell
                             })
-
+                            
                             # If object left zone or force=True (segment end), mark as finalized
                             if not still_in_zone or force:
                                 keys_to_remove.append((track_id, zone_name))
                             break
-
+                
                 # Update dwell times in master log
                 if zone_updates:
                     try:
                         self.exporter.update_zone_dwell_times(zone_updates, video_source=video_name)
                     except Exception as e:
                         self.logger.warning(f"Live master log dwell update failed: {e}")
-
+                
                 # Remove finalized zone events from tracking
                 for key in keys_to_remove:
                     self.active_zone_events.pop(key, None)
@@ -730,10 +735,10 @@ class VideoWorker:
                     if self.video_start_time and self.video_current_time:
                         start_time = self.video_start_time
                         end_time = self.video_current_time
-
+                        
                         # Set the start time for filename generation
                         self.heatmap_acc.last_emit_t = start_time.timestamp()
-
+                        
                         out_path = self.heatmap_acc.render_and_save(
                             frame_bgr=last_frame,
                             label=self.video_path.stem,
@@ -796,8 +801,13 @@ class VideoProcessor:
         self.show_controls = True  # Instructions panel visibility
         self.ui_minimized = False  # Global minimize state
 
-        # Results exporter
-        self.exporter = ResultsExporter(config.output_folder)
+        # Results exporter (with cloud upload settings from AppConfig)
+        export_config = ExportConfig(
+            cloud_db_name=getattr(config, 'cloud_db_name', '') or '',
+            cloud_table_name=getattr(config, 'cloud_table_name', '') or '',
+            cloud_db_config_path=getattr(config, 'cloud_db_config_path', '') or ''
+        )
+        self.exporter = ResultsExporter(config.output_folder, export_config)
 
         # Heatmap state
         self.heatmap_acc = None
@@ -857,7 +867,7 @@ class VideoProcessor:
         self.last_live_export_time = time.time()
         self.last_exported_event_count = 0
         self.export_lock = threading.Lock()
-
+        
         # Track active zone events that need dwell time updates
         self.active_zone_events = {}
 
@@ -1177,7 +1187,7 @@ class VideoProcessor:
 
                     # Create isolated worker for this video
                     # Pass queue_size_callback for extended stability wait when queue <= 1
-                    worker = VideoWorker(self.config, video_path, worker_id_counter,
+                    worker = VideoWorker(self.config, video_path, worker_id_counter, 
                                         queue_size_callback=get_queue_size)
 
                     # Get total frames for registration
@@ -1257,31 +1267,16 @@ class VideoProcessor:
                 # Check if we're done
                 if active_workers == 0 and video_queue.empty():
                     if self.config.input_type.value == "folder":
-                        self.logger.info("Waiting for new files... (Press ESC or Ctrl+C to exit)")
-                        progress.set_status("Waiting for new files... (Press ESC or Ctrl+C to exit)")
-
-                        # [RESIZED IDLE LOOP]
+                        # Wait indefinitely for new files (folder monitoring mode)
+                        self.logger.info("All current videos processed, waiting for new files... (Ctrl+C to stop)")
+                        progress.set_status("Waiting for new files... (Ctrl+C to stop)")
                         while video_queue.empty():
-                            # 1. Keep the Progress Window alive so it doesn't "Not Respond"
-                            if progress and not progress.is_closed:
-                                try:
-                                    # This allows the window to see the Ctrl+C you just bound
-                                    progress.root.update()
-                                except:
-                                    break
-
-                            # 2. Keep OpenCV alive too (standard practice)
-                            cv2.waitKey(100)
-
-                            # 3. Small sleep to keep CPU usage low
-                            time.sleep(0.05)
-
+                            time.sleep(2)  # Check every 2 seconds
                         self.logger.info("New video detected, resuming processing...")
-                        continue
                     else:
                         break
 
-                    # Standard loop sleep to prevent busy-waiting while processing
+                # Small sleep to prevent busy-waiting
                 time.sleep(0.1)
 
         except KeyboardInterrupt:
@@ -2617,7 +2612,7 @@ class VideoProcessor:
         try:
             # Pass video time for accurate dwell calculation
             current_time = self.video_current_time if self.video_current_time else datetime.now()
-
+            
             # UPDATE EVENTS WITH FINAL STATS BEFORE FINAL EXPORT
             self.counter.update_events_with_final_stats(current_time)
 
@@ -2665,7 +2660,7 @@ class VideoProcessor:
 
             # Force final live export to master_log before segment export
             self._trigger_live_export(force=True)
-
+            
             # Disable master_log export here since _trigger_live_export already handled it
             # (prevents duplicate entries in master_log)
             original_master_setting = self.exporter.config.enable_master_log
@@ -2761,7 +2756,7 @@ class VideoProcessor:
             # Cleanup training mode
             if self.training_capture:
                 self.training_capture.cleanup()
-
+            
             # Flush any queued master log events before exit
             try:
                 from results_export import get_master_log_writer
@@ -2961,7 +2956,7 @@ class VideoProcessor:
     def _trigger_live_export(self, force: bool = False):
         """
         Check if we should export new events to master_log.
-
+        
         For zone events:
         - New zone events are appended immediately
         - Dwell times are updated periodically while object is in zone
@@ -2973,7 +2968,7 @@ class VideoProcessor:
         if force or (now - self.last_live_export_time >= self.live_export_interval):
             # Pass video time for accurate dwell calculation
             current_time = self.video_current_time if self.video_current_time else datetime.now()
-
+            
             # Update events with current video time before getting summary
             self.counter.update_events_with_final_stats(current_time)
 
@@ -2988,13 +2983,13 @@ class VideoProcessor:
             # STEP 1: Append NEW events (both line and zone)
             if current_total > self.last_exported_event_count:
                 new_events_slice = all_events[self.last_exported_event_count:]
-
+                
                 # Track new zone events for future dwell updates
                 for event in new_events_slice:
                     if event.get('zone_name'):
                         key = (event.get('track_id'), event.get('zone_name'))
                         self.active_zone_events[key] = True
-
+                
                 # Append all new events to master log via background thread
                 import copy
                 events_to_export = copy.deepcopy(new_events_slice)
@@ -3004,40 +2999,40 @@ class VideoProcessor:
                         args=(events_to_export, segment_id, video_name),
                         daemon=True
                     ).start()
-
+                
                 self.last_exported_event_count = current_total
 
             # STEP 2: Update dwell times for active zone events
             if self.active_zone_events:
                 zone_updates = []
                 keys_to_remove = []
-
+                
                 for (track_id, zone_name), is_active in list(self.active_zone_events.items()):
                     if not is_active:
                         continue
-
+                    
                     # Find the event in all_events to get current dwell
                     for event in all_events:
                         if event.get('track_id') == track_id and event.get('zone_name') == zone_name:
                             dwell = event.get('dwell_seconds', 0.0)
-
+                            
                             # Check if object is still in zone
                             obj_state = self.counter.object_states.get(track_id)
                             still_in_zone = False
                             if obj_state:
                                 still_in_zone = obj_state.zone_presence.get(zone_name, False)
-
+                            
                             zone_updates.append({
                                 'track_id': track_id,
                                 'zone_name': zone_name,
                                 'dwell_seconds': dwell
                             })
-
+                            
                             # If object left zone or force=True (segment end), mark as finalized
                             if not still_in_zone or force:
                                 keys_to_remove.append((track_id, zone_name))
                             break
-
+                
                 # Update dwell times in master log via background thread
                 if zone_updates:
                     def update_task():
@@ -3048,9 +3043,9 @@ class VideoProcessor:
                                 self.logger.error(f"Live master log dwell update failed: {e}")
                             finally:
                                 self.export_lock.release()
-
+                    
                     threading.Thread(target=update_task, daemon=True).start()
-
+                
                 # Remove finalized zone events from tracking
                 for key in keys_to_remove:
                     self.active_zone_events.pop(key, None)
