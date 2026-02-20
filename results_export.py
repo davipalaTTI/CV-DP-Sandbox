@@ -26,6 +26,9 @@ from queue import Queue, Empty
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from configparser import ConfigParser
+import requests
+import os
+from dotenv import load_dotenv
 
 # Try to import psycopg2 for PostgreSQL support (optional)
 try:
@@ -33,6 +36,8 @@ try:
     PSYCOPG2_AVAILABLE = True
 except ImportError:
     PSYCOPG2_AVAILABLE = False
+
+
 
 # Global lock for master log file access (shared across all ResultsExporter instances)
 _master_log_lock = threading.Lock()
@@ -399,6 +404,7 @@ def get_master_log_writer() -> MasterLogWriter:
 class ExportConfig:
     export_formats: List[str] = None  # ['json', 'csv', 'excel']
     enable_master_log: bool = True  # Enable master event log
+    enable_api_upload: bool = False
     # PostgreSQL cloud upload settings (optional - leave blank to skip cloud upload)
     cloud_db_name: str = ""  # Database section name (e.g., 'cv-database')
     cloud_table_name: str = ""  # Target table name for uploads
@@ -770,6 +776,67 @@ class ResultsExporter:
         return cloud_df.to_dict(orient="records")
 
     # ========================================================================
+    # API Upload Helper Methods (if API URL is configured)
+    # ========================================================================
+
+    def _upload_to_api(self, api_url: str, api_key: str, payload: List[Dict]) -> bool:
+        """
+        Handles the actual HTTPS POST request to the remote bridge.
+        """
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": api_key
+        }
+
+        try:
+            response = requests.post(api_url, json=payload, headers=headers, timeout=15)
+
+            if response.status_code == 200:
+                self.logger.info(f"Cloud API: Successfully uploaded {len(payload)} records.")
+                return True
+            else:
+                self.logger.error(f"Cloud API Error ({response.status_code}): {response.text}")
+                return False
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Cloud API Connection Failed: {e}")
+            return False
+
+    def _prepare_api_payload(self, event_list: List[Dict]) -> List[Dict]:
+        """
+        Cleans and transforms raw events into the specific format required
+        by the FastAPI MasterEventLog schema.
+        """
+        if not event_list:
+            return []
+
+        # 1. Load into DataFrame for batch processing
+        df = pd.DataFrame(event_list)
+
+        # 2. Drop non-schema columns
+        drop_cols = ["event_id", "class_id", "speed_units", "segment_id",
+                     "confidence", "timestamp", "position"]
+        df = df.drop(columns=[c for c in drop_cols if c in df.columns])
+
+        # 3. Rename to match database models (actual_datetime -> time)
+        rename_map = {"actual_datetime": "time", "speed": "speed_mph"}
+        df = df.rename(columns=rename_map)
+
+        # 4. Cast and Round (Ensures Pydantic validation passes)
+        if "speed_mph" in df.columns:
+            df["speed_mph"] = pd.to_numeric(df["speed_mph"], errors='coerce').round().astype("Int64")
+        if "track_id" in df.columns:
+            df["track_id"] = pd.to_numeric(df["track_id"], errors='coerce').round().astype("Int64")
+        if "dwell_seconds" in df.columns:
+            df["dwell_seconds"] = pd.to_numeric(df["dwell_seconds"], errors='coerce').fillna(0)
+            df["dwell_seconds"] = np.ceil(df["dwell_seconds"]).astype("Int64")
+
+        # 5. Clean for JSON serialization (replace NaN with None)
+        df = df.replace({np.nan: None, np.inf: None, -np.inf: None})
+
+        return df.to_dict(orient="records")
+
+    # ========================================================================
     # Segment Export Methods
     # ========================================================================
 
@@ -857,6 +924,34 @@ class ResultsExporter:
                 except Exception as cloud_error:
                     self.logger.error(f"Cloud upload failed for segment {segment_id}: {cloud_error}")
                     # Continue without failing - local export already succeeded
+            # ================================================================
+            # Cloud API Upload (Refactored)
+            # ================================================================
+            if self.config.enable_api_upload:
+                self.logger.info("API Upload is CHECKED. Loading .env credentials...")
+
+                # Load the .env file
+                load_dotenv()
+
+                # NOTE: Ensure these exactly match the text inside your .env file
+                api_url = os.getenv("API_URL")
+                api_key = os.getenv("API_KEY")
+
+                if api_url and api_key:
+                    self.logger.info(f"API Credentials found. Target: {api_url}")
+                    # Step 1: Format
+                    payload = self._prepare_api_payload(event_list)
+
+                    # Step 2: Upload
+                    if self._upload_to_api(api_url, api_key, payload):
+                        exported_files['cloud_status'] = "Success"
+                    else:
+                        self.logger.error("Failed to upload data to the API.")
+                else:
+                    self.logger.error(
+                        "API Upload checked, but 'API_URL' or 'API_KEY' are missing/misspelled in the .env file!")
+            else:
+                self.logger.debug("API Upload is DISABLED in ExportConfig.")
 
             return exported_files
 

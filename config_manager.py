@@ -9,7 +9,7 @@ Handles all configuration aspects including:
 """
 
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 import json
 import yaml
 from pathlib import Path
@@ -135,6 +135,9 @@ class AppConfig:
     cloud_table_name: str = ""  # Target table name for uploads
     cloud_db_config_path: str = ""  # Path to database config file
 
+    # API Connection
+    enable_api_upload: bool = False
+
 
 class ConfigManager:
     """Manages application configuration"""
@@ -161,6 +164,47 @@ class ConfigManager:
         root = tk.Tk()
         root.title("Multi-Line Counter - Configuration")
         root.resizable(True, True)
+
+        # --- TASKBAR SAFETY: Dynamic Height ---
+        screen_h = root.winfo_screenheight()
+        # Set height to 85% of screen height to ensure buttons are above taskbar
+        win_h = min(850, int(screen_h * 0.85))
+        root.geometry(f"650x{win_h}")
+
+        # --- REPAIRED SCROLLBAR SETUP ---
+        main_container = tk.Frame(root)
+        main_container.pack(fill="both", expand=True)
+
+        # Row 0 (Canvas) gets all extra space, Row 1 (Buttons) stays at the bottom
+        main_container.grid_rowconfigure(0, weight=1)
+        main_container.grid_rowconfigure(1, weight=0)
+        main_container.grid_columnconfigure(0, weight=1)
+
+        # 1. Scrollable Viewport (Canvas)
+        canvas = tk.Canvas(main_container, highlightthickness=0, width=600)
+        canvas.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = tk.ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollable_frame = tk.Frame(canvas)
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
+
+        # 2. FIXED BUTTONS (Now outside the canvas)
+        # These will ALWAYS be at the bottom of the window
+        button_frame = tk.Frame(main_container, pady=10, relief="raised", borderwidth=1)
+        button_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
+
+        # Mouse wheel support
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        root.bind_all("<MouseWheel>", _on_mousewheel)
 
         # Variables
         config_vars = {
@@ -196,6 +240,7 @@ class ConfigManager:
         }
 
         cloud_db_vars = {
+            'enable_api_upload': tk.BooleanVar(value=False),
             'cloud_db_name': tk.StringVar(value=""),
             'cloud_table_name': tk.StringVar(value=""),
             'cloud_db_config_path': tk.StringVar(value=""),
@@ -377,6 +422,7 @@ class ConfigManager:
                 training_include_empty=training_vars['training_empty'].get(),
                 training_augment=training_vars['training_augment'].get(),
                 # --- Cloud database upload params ---
+                enable_api_upload=cloud_db_vars['enable_api_upload'].get(),
                 cloud_db_name=cloud_db_vars['cloud_db_name'].get().strip(),
                 cloud_table_name=cloud_db_vars['cloud_table_name'].get().strip(),
                 cloud_db_config_path=cloud_db_vars['cloud_db_config_path'].get().strip(),
@@ -388,77 +434,75 @@ class ConfigManager:
             """Cancel configuration"""
             root.quit()
 
-        # Layout
+        # --- UPDATED LAYOUT (Everything uses scrollable_frame) ---
         row = 0
 
         # Model selection
-        tk.Label(root, text="YOLO Model File:", font=("Arial", 10, "bold")).grid(
+        tk.Label(scrollable_frame, text="YOLO Model File:", font=("Arial", 10, "bold")).grid(
             row=row, column=0, sticky="w", padx=10, pady=5
         )
-        model_entry = tk.Entry(root, textvariable=config_vars['model_path'], width=50)
+        model_entry = tk.Entry(scrollable_frame, textvariable=config_vars['model_path'], width=50)
         model_entry.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
-        tk.Button(root, text="Browse...", command=browse_model).grid(
+        tk.Button(scrollable_frame, text="Browse...", command=lambda: browse_model()).grid(
             row=row, column=2, padx=5, pady=5
         )
         row += 1
 
         # Input type selection
-        tk.Label(root, text="Input Type:", font=("Arial", 10, "bold")).grid(
+        tk.Label(scrollable_frame, text="Input Type:", font=("Arial", 10, "bold")).grid(
             row=row, column=0, sticky="w", padx=10, pady=5
         )
-        input_frame = tk.Frame(root)
+        input_frame = tk.Frame(scrollable_frame)
         input_frame.grid(row=row, column=1, sticky="w", padx=5, pady=5)
-
         tk.Radiobutton(input_frame, text="Folder", variable=config_vars['input_type'],
-                       value="folder", command=toggle_input_fields).pack(side="left")
-        tk.Radiobutton(input_frame, text="Video File", variable=config_vars['input_type'],
-                       value="video", command=toggle_input_fields).pack(side="left")
+                       value="folder", command=lambda: toggle_input_fields()).pack(side="left")
+        tk.Radiobutton(input_frame, text="Video", variable=config_vars['input_type'],
+                       value="video", command=lambda: toggle_input_fields()).pack(side="left")
         tk.Radiobutton(input_frame, text="Camera", variable=config_vars['input_type'],
-                       value="camera", command=toggle_input_fields).pack(side="left")
+                       value="camera", command=lambda: toggle_input_fields()).pack(side="left")
         row += 1
 
         # Input source
-        tk.Label(root, text="Input Source:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
-        input_entry = tk.Entry(root, textvariable=config_vars['input_source'], width=50)
+        tk.Label(scrollable_frame, text="Input Source:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
+        input_entry = tk.Entry(scrollable_frame, textvariable=config_vars['input_source'], width=50)
         input_entry.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
-        input_browse_btn = tk.Button(root, text="Browse...", command=browse_input)
+        input_browse_btn = tk.Button(scrollable_frame, text="Browse...", command=lambda: browse_input())
         input_browse_btn.grid(row=row, column=2, padx=5, pady=5)
         row += 1
 
-        # Camera selection
-        tk.Label(root, text="Camera:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
-        camera_values = [f"{i}: Camera {i}" for i in range(len(self._available_cameras))]
-        if not camera_values:
-            camera_values = ["No cameras found"]
-
-        from tkinter import ttk
-        camera_combo = ttk.Combobox(root, textvariable=config_vars['camera_index'],
-                                    values=camera_values, state="disabled", width=47)
+        # Camera selection (Directly using tk.ttk)
+        tk.Label(scrollable_frame, text="Camera:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
+        camera_values = [f"{i}: Camera {i}" for i in range(len(self._available_cameras))] or ["No cameras found"]
+        camera_combo = tk.ttk.Combobox(scrollable_frame, textvariable=config_vars['camera_index'],
+                                       values=camera_values, state="disabled", width=47)
         camera_combo.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
         row += 1
 
         # Output folder
-        tk.Label(root, text="Output Folder:", font=("Arial", 10, "bold")).grid(
+        tk.Label(scrollable_frame, text="Output Folder:", font=("Arial", 10, "bold")).grid(
             row=row, column=0, sticky="w", padx=10, pady=5
         )
-        output_entry = tk.Entry(root, textvariable=config_vars['output_folder'], width=50)
+        output_entry = tk.Entry(scrollable_frame, textvariable=config_vars['output_folder'], width=50)
         output_entry.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
-        tk.Button(root, text="Browse...", command=browse_output).grid(
+        tk.Button(scrollable_frame, text="Browse...", command=lambda: browse_output()).grid(
             row=row, column=2, padx=5, pady=5
         )
         row += 1
 
-        # Options
-        options_frame = tk.LabelFrame(root, text="Options", font=("Arial", 10, "bold"))
+        # Options Section
+        options_frame = tk.LabelFrame(scrollable_frame, text="Options", font=("Arial", 10, "bold"))
         options_frame.grid(row=row, column=0, columnspan=3, padx=10, pady=10, sticky="ew")
-
-        tk.Checkbutton(options_frame, text="Enable Zone Counters",
-                       variable=config_vars['enable_zones']).grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        tk.Checkbutton(options_frame, text="Save Video Output",
-                       variable=config_vars['save_video']).grid(row=0, column=1, sticky="w", padx=5, pady=2)
-        tk.Checkbutton(options_frame, text="Enable Heatmap Overlay",
-                       variable=config_vars['enable_heatmap']).grid(row=0, column=2, sticky="w", padx=5, pady=2)
-
+        tk.Checkbutton(options_frame, text="Enable Zones", variable=config_vars['enable_zones']).grid(row=0,
+                                                                                                      column=0,
+                                                                                                      sticky="w",
+                                                                                                      padx=5)
+        tk.Checkbutton(options_frame, text="Save Video", variable=config_vars['save_video']).grid(row=0, column=1,
+                                                                                                  sticky="w",
+                                                                                                  padx=5)
+        tk.Checkbutton(options_frame, text="Heatmap", variable=config_vars['enable_heatmap']).grid(row=0, column=2,
+                                                                                                   sticky="w",
+                                                                                                   padx=5)
+        row += 1
         # Advanced settings
         advanced_frame = tk.Frame(options_frame)
         advanced_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
@@ -477,7 +521,7 @@ class ConfigManager:
 
         # --- Speed (optional) ---
         row += 1
-        speed_frame = tk.LabelFrame(root, text="Speed (optional)", font=("Arial", 10, "bold"))
+        speed_frame = tk.LabelFrame(scrollable_frame, text="Speed (optional)", font=("Arial", 10, "bold"))
         speed_frame.grid(row=row, column=0, columnspan=3, padx=10, pady=6, sticky="ew")
 
         # Left side: master toggle + draw labels
@@ -505,7 +549,7 @@ class ConfigManager:
 
         # --- Frame Skipping ---
         row += 1
-        frame_skip_frame = tk.LabelFrame(root, text="Performance Optimization", font=("Arial", 10, "bold"))
+        frame_skip_frame = tk.LabelFrame(scrollable_frame, text="Performance Optimization", font=("Arial", 10, "bold"))
         frame_skip_frame.grid(row=row, column=0, columnspan=3, padx=10, pady=6, sticky="ew")
 
         # Frame skip dropdown
@@ -545,13 +589,13 @@ class ConfigManager:
         )
         parallel_combo.grid(row=1, column=1, sticky="w", padx=5, pady=4)
         parallel_combo.set("1")
-
+        
         tk.Label(frame_skip_frame, text="(higher = faster but uses more GPU memory)").grid(
             row=1, column=2, columnspan=4, sticky="w", padx=5, pady=4)
 
         # --- Training Mode (optional) ---
         row += 1
-        training_frame = tk.LabelFrame(root, text="Training Mode (optional)", font=("Arial", 10, "bold"))
+        training_frame = tk.LabelFrame(scrollable_frame, text="Training Mode (optional)", font=("Arial", 10, "bold"))
         training_frame.grid(row=row, column=0, columnspan=3, padx=10, pady=6, sticky="ew")
 
         # Enable training mode checkbox
@@ -585,8 +629,15 @@ class ConfigManager:
 
         # --- Cloud Database Upload (optional) ---
         row += 1
-        cloud_frame = tk.LabelFrame(root, text="Cloud Database Upload (optional)", font=("Arial", 10, "bold"))
+        cloud_frame = tk.LabelFrame(scrollable_frame, text="Cloud Database Upload (optional)", font=("Arial", 10, "bold"))
         cloud_frame.grid(row=row, column=0, columnspan=3, padx=10, pady=6, sticky="ew")
+
+        # Checkbox to enable API Upload
+        tk.Checkbutton(
+            cloud_frame,
+            text="Enable API Upload (Uses hidden .env credentials)",
+            variable=cloud_db_vars['enable_api_upload']
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=5, pady=4)
 
         def browse_db_config():
             """Browse for database config file"""
@@ -603,23 +654,24 @@ class ConfigManager:
                 cloud_db_vars['cloud_db_config_path'].set(filename)
 
         # Database config file path
-        tk.Label(cloud_frame, text="DB Config File:").grid(row=0, column=0, sticky="w", padx=5, pady=4)
+        tk.Label(cloud_frame, text="DB Config File:").grid(row=1, column=0, sticky="w", padx=5, pady=4)
         db_config_entry = tk.Entry(cloud_frame, textvariable=cloud_db_vars['cloud_db_config_path'], width=40)
-        db_config_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=4)
-        tk.Button(cloud_frame, text="Browse...", command=browse_db_config).grid(row=0, column=2, padx=5, pady=4)
+        db_config_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=4)
+        tk.Button(cloud_frame, text="Browse...", command=browse_db_config).grid(row=1, column=2, padx=5, pady=4)
 
         # Database section name
-        tk.Label(cloud_frame, text="DB Section Name:").grid(row=1, column=0, sticky="w", padx=5, pady=4)
+        tk.Label(cloud_frame, text="DB Section Name:").grid(row=2, column=0, sticky="w", padx=5, pady=4)
         db_name_entry = tk.Entry(cloud_frame, textvariable=cloud_db_vars['cloud_db_name'], width=25)
-        db_name_entry.grid(row=1, column=1, sticky="w", padx=5, pady=4)
+        db_name_entry.grid(row=2, column=1, sticky="w", padx=5, pady=4)
 
         # Table name
-        tk.Label(cloud_frame, text="Table Name:").grid(row=2, column=0, sticky="w", padx=5, pady=4)
+        tk.Label(cloud_frame, text="Table Name:").grid(row=3, column=0, sticky="w", padx=5, pady=4)
         table_name_entry = tk.Entry(cloud_frame, textvariable=cloud_db_vars['cloud_table_name'], width=25)
-        table_name_entry.grid(row=2, column=1, sticky="w", padx=5, pady=4)
+        table_name_entry.grid(row=3, column=1, sticky="w", padx=5, pady=4)
 
+        # Help Text
         tk.Label(cloud_frame, text="(Leave all blank to skip cloud upload)", fg="gray", font=("Arial", 8)).grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=5, pady=2)
+            row=4, column=0, columnspan=3, sticky="w", padx=5, pady=2)
 
         cloud_frame.columnconfigure(1, weight=1)
 
@@ -719,6 +771,7 @@ class ConfigManager:
                 training_vars['training_augment'].set(loaded_config.training_augment)
                 
                 # Cloud database settings
+                cloud_db_vars['enable_api_upload'].set(getattr(loaded_config, 'enable_api_upload', False))
                 cloud_db_vars['cloud_db_name'].set(getattr(loaded_config, 'cloud_db_name', '') or '')
                 cloud_db_vars['cloud_table_name'].set(getattr(loaded_config, 'cloud_table_name', '') or '')
                 cloud_db_vars['cloud_db_config_path'].set(getattr(loaded_config, 'cloud_db_config_path', '') or '')
@@ -734,31 +787,32 @@ class ConfigManager:
                 self.logger.error(f"Error loading config: {e}")
                 messagebox.showerror("Error", f"Failed to load configuration:\n{e}", parent=root)
 
-        # Buttons
-        button_frame = tk.Frame(root)
-        button_frame.grid(row=row, column=0, columnspan=3, pady=20)
+        # 2. FIXED BUTTONS (Stays at the very bottom)
+        button_frame = tk.Frame(main_container, pady=10, relief="raised", borderwidth=1)
+        button_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
 
-        tk.Button(button_frame, text="Load Config...", command=load_existing_config,
+        # NEW: A sub-frame that centers itself within button_frame
+        center_btn_container = tk.Frame(button_frame)
+        center_btn_container.pack(expand=True)  # This is the magic line for centering
+
+        # Now pack your buttons into the container instead of the main frame
+        tk.Button(center_btn_container, text="Load Config...", command=load_existing_config,
                   width=15, bg="#2196F3", fg="white").pack(side="left", padx=10)
-        tk.Button(button_frame, text="Cancel", command=cancel, width=15).pack(side="left", padx=10)
-        tk.Button(button_frame, text="Continue", command=validate_and_submit,
+
+        tk.Button(center_btn_container, text="Cancel", command=cancel,
+                  width=15).pack(side="left", padx=10)
+
+        tk.Button(center_btn_container, text="Continue", command=validate_and_submit,
                   width=15, bg="#4CAF50", fg="white").pack(side="left", padx=10)
 
-        # Configure grid weights
-        root.columnconfigure(1, weight=1)
-        options_frame.columnconfigure(0, weight=1)
-        options_frame.columnconfigure(1, weight=1)
-        advanced_frame.columnconfigure(1, weight=1)
-
-        # Initialize field states
+        scrollable_frame.columnconfigure(1, weight=1)
         toggle_input_fields()
 
-        # Run dialog
-        root.update_idletasks()
+        # so the window is centered correctly once all widgets are drawn.
         self.center_window(root)
+
         root.mainloop()
         root.destroy()
-
         return result_config
 
         # Show effective FPS
@@ -1021,15 +1075,33 @@ class ConfigManager:
             speed_smooth_window=5,
             annotate_speed=True,
         )
+
     def center_window(self, window):
+        """Center the window relative to the area above the taskbar"""
+
+        window.update_idletasks()
+
         window_width = window.winfo_width()
         window_height = window.winfo_height()
         screen_width = window.winfo_screenwidth()
         screen_height = window.winfo_screenheight()
-        x = (screen_width - window_width) // 2
-        y = (screen_height - window_height) // 2
-        window.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
+        # Estimate the "Usable Area" height (95% of screen height)
+        # This effectively ignores the bottom 5% where the Taskbar usually sits.
+        usable_height = screen_height * 0.95
+
+        # Horizontal Center
+        x = (screen_width - window_width) // 2
+
+        # Vertical Center (relative to usable_height)
+        y = int((usable_height - window_height) // 2)
+
+        # Safety: Ensure it doesn't go off the top of the screen
+        if y < 0:
+            y = 0
+
+        # Apply the new coordinates (+x+y moves the window without changing size)
+        window.geometry(f"+{x}+{y}")
 
 def resolve_colormap(name: str) -> int:
     """

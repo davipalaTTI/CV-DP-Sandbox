@@ -108,6 +108,7 @@ class VideoWorker:
 
         # Each worker gets its own exporter (with cloud upload settings from AppConfig)
         export_config = ExportConfig(
+            enable_api_upload=self.config.enable_api_upload,
             cloud_db_name=getattr(config, 'cloud_db_name', '') or '',
             cloud_table_name=getattr(config, 'cloud_table_name', '') or '',
             cloud_db_config_path=getattr(config, 'cloud_db_config_path', '') or ''
@@ -803,6 +804,7 @@ class VideoProcessor:
 
         # Results exporter (with cloud upload settings from AppConfig)
         export_config = ExportConfig(
+            enable_api_upload=self.config.enable_api_upload,
             cloud_db_name=getattr(config, 'cloud_db_name', '') or '',
             cloud_table_name=getattr(config, 'cloud_table_name', '') or '',
             cloud_db_config_path=getattr(config, 'cloud_db_config_path', '') or ''
