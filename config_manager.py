@@ -18,6 +18,7 @@ from typing import List, Tuple, Dict, Optional, Set, Union
 import logging
 import cv2
 from enum import Enum
+from utils import get_available_axis_cameras
 
 
 class InputType(Enum):
@@ -130,11 +131,6 @@ class AppConfig:
     folder_idle_timeout: float = 0.0  # Seconds to wait for new files before exiting (0 = wait forever)
     pre_process_stability_seconds: float = 10.0  # Seconds file must be stable before starting processing
 
-    # Cloud database upload settings (optional - leave blank to skip cloud upload)
-    cloud_db_name: str = ""  # Database section name in config file (e.g., 'cv-database')
-    cloud_table_name: str = ""  # Target table name for uploads
-    cloud_db_config_path: str = ""  # Path to database config file
-
     # API Connection
     enable_api_upload: bool = False
 
@@ -145,6 +141,8 @@ class ConfigManager:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self._available_cameras = self._detect_cameras()
+        # Scan for AXIS IP cameras
+        self._network_cameras = get_available_axis_cameras()
 
     def get_initial_config(self) -> Optional[AppConfig]:
         """
@@ -241,9 +239,6 @@ class ConfigManager:
 
         cloud_db_vars = {
             'enable_api_upload': tk.BooleanVar(value=False),
-            'cloud_db_name': tk.StringVar(value=""),
-            'cloud_table_name': tk.StringVar(value=""),
-            'cloud_db_config_path': tk.StringVar(value=""),
         }
 
         # --- NEW: Aggregation + alignment vars ---
@@ -329,17 +324,18 @@ class ConfigManager:
             input_type = config_vars['input_type'].get()
 
             if input_type == "camera":
-                if not self._available_cameras:
-                    messagebox.showerror("Error", "No camera devices found.", parent=root)
-                    return
-
                 selected = config_vars['camera_index'].get().strip()
-                try:
-                    # Accept either "1: Camera 1" or "1"
-                    source = int(selected.split(":", 1)[0].strip())
-                except Exception:
-                    messagebox.showerror("Error", "Please select a valid camera index.", parent=root)
-                    return
+
+                # Check if they selected an Axis camera from the list
+                if selected in self._network_cameras:
+                    source = self._network_cameras[selected]  # Gets the RTSP URL
+                else:
+                    # It's a standard webcam
+                    try:
+                        source = int(selected.split(":", 1)[0].strip())
+                    except Exception:
+                        messagebox.showerror("Error", "Please select a valid camera.", parent=root)
+                        return
 
                 is_camera = True
                 input_type_enum = InputType.CAMERA
@@ -421,11 +417,8 @@ class ConfigManager:
                 training_min_confidence=float(training_vars['training_confidence'].get() or 0.5),
                 training_include_empty=training_vars['training_empty'].get(),
                 training_augment=training_vars['training_augment'].get(),
-                # --- Cloud database upload params ---
+                # --- API data upload param ---
                 enable_api_upload=cloud_db_vars['enable_api_upload'].get(),
-                cloud_db_name=cloud_db_vars['cloud_db_name'].get().strip(),
-                cloud_table_name=cloud_db_vars['cloud_table_name'].get().strip(),
-                cloud_db_config_path=cloud_db_vars['cloud_db_config_path'].get().strip(),
             )
 
             root.quit()
@@ -472,9 +465,28 @@ class ConfigManager:
 
         # Camera selection (Directly using tk.ttk)
         tk.Label(scrollable_frame, text="Camera:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
-        camera_values = [f"{i}: Camera {i}" for i in range(len(self._available_cameras))] or ["No cameras found"]
+
+        # Build the unified camera list
+        camera_values = []
+        for i in range(len(self._available_cameras)):
+            camera_values.append(f"{i}: Standard Webcam {i}")
+
+        # Add the dynamically found Axis cameras
+        for axis_name in self._network_cameras.keys():
+            camera_values.append(axis_name)
+
+        if not camera_values:
+            camera_values = ["No cameras found"]
+
         camera_combo = tk.ttk.Combobox(scrollable_frame, textvariable=config_vars['camera_index'],
                                        values=camera_values, state="disabled", width=47)
+
+        # Auto-select the first Axis camera if one was found, otherwise default to first webcam
+        if self._network_cameras:
+            config_vars['camera_index'].set(list(self._network_cameras.keys())[0])
+        elif self._available_cameras:
+            config_vars['camera_index'].set(camera_values[0])
+
         camera_combo.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
         row += 1
 
@@ -627,53 +639,17 @@ class ConfigManager:
                        variable=training_vars['training_augment']).grid(row=5, column=0, columnspan=2, sticky="w",
                                                                         padx=5, pady=2)
 
-        # --- Cloud Database Upload (optional) ---
+        # --- API Upload (optional) ---
         row += 1
-        cloud_frame = tk.LabelFrame(scrollable_frame, text="Cloud Database Upload (optional)", font=("Arial", 10, "bold"))
+        cloud_frame = tk.LabelFrame(scrollable_frame, text="API Upload", font=("Arial", 10, "bold"))
         cloud_frame.grid(row=row, column=0, columnspan=3, padx=10, pady=6, sticky="ew")
 
         # Checkbox to enable API Upload
         tk.Checkbutton(
             cloud_frame,
-            text="Enable API Upload (Uses hidden .env credentials)",
+            text="Enable API Upload",
             variable=cloud_db_vars['enable_api_upload']
         ).grid(row=0, column=0, columnspan=3, sticky="w", padx=5, pady=4)
-
-        def browse_db_config():
-            """Browse for database config file"""
-            filetypes = [
-                ("Config Files", "*.conf *.ini *.cfg"),
-                ("All Files", "*.*")
-            ]
-            filename = filedialog.askopenfilename(
-                title="Select Database Config File",
-                filetypes=filetypes,
-                parent=root
-            )
-            if filename:
-                cloud_db_vars['cloud_db_config_path'].set(filename)
-
-        # Database config file path
-        tk.Label(cloud_frame, text="DB Config File:").grid(row=1, column=0, sticky="w", padx=5, pady=4)
-        db_config_entry = tk.Entry(cloud_frame, textvariable=cloud_db_vars['cloud_db_config_path'], width=40)
-        db_config_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=4)
-        tk.Button(cloud_frame, text="Browse...", command=browse_db_config).grid(row=1, column=2, padx=5, pady=4)
-
-        # Database section name
-        tk.Label(cloud_frame, text="DB Section Name:").grid(row=2, column=0, sticky="w", padx=5, pady=4)
-        db_name_entry = tk.Entry(cloud_frame, textvariable=cloud_db_vars['cloud_db_name'], width=25)
-        db_name_entry.grid(row=2, column=1, sticky="w", padx=5, pady=4)
-
-        # Table name
-        tk.Label(cloud_frame, text="Table Name:").grid(row=3, column=0, sticky="w", padx=5, pady=4)
-        table_name_entry = tk.Entry(cloud_frame, textvariable=cloud_db_vars['cloud_table_name'], width=25)
-        table_name_entry.grid(row=3, column=1, sticky="w", padx=5, pady=4)
-
-        # Help Text
-        tk.Label(cloud_frame, text="(Leave all blank to skip cloud upload)", fg="gray", font=("Arial", 8)).grid(
-            row=4, column=0, columnspan=3, sticky="w", padx=5, pady=2)
-
-        cloud_frame.columnconfigure(1, weight=1)
 
         row += 1
 
@@ -772,9 +748,6 @@ class ConfigManager:
                 
                 # Cloud database settings
                 cloud_db_vars['enable_api_upload'].set(getattr(loaded_config, 'enable_api_upload', False))
-                cloud_db_vars['cloud_db_name'].set(getattr(loaded_config, 'cloud_db_name', '') or '')
-                cloud_db_vars['cloud_table_name'].set(getattr(loaded_config, 'cloud_table_name', '') or '')
-                cloud_db_vars['cloud_db_config_path'].set(getattr(loaded_config, 'cloud_db_config_path', '') or '')
                 
                 # Update field states
                 toggle_input_fields()

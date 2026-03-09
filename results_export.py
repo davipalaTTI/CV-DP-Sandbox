@@ -30,13 +30,6 @@ import requests
 import os
 from dotenv import load_dotenv
 
-# Try to import psycopg2 for PostgreSQL support (optional)
-try:
-    import psycopg2
-    PSYCOPG2_AVAILABLE = True
-except ImportError:
-    PSYCOPG2_AVAILABLE = False
-
 
 
 # Global lock for master log file access (shared across all ResultsExporter instances)
@@ -405,10 +398,6 @@ class ExportConfig:
     export_formats: List[str] = None  # ['json', 'csv', 'excel']
     enable_master_log: bool = True  # Enable master event log
     enable_api_upload: bool = False
-    # PostgreSQL cloud upload settings (optional - leave blank to skip cloud upload)
-    cloud_db_name: str = ""  # Database section name (e.g., 'cv-database')
-    cloud_table_name: str = ""  # Target table name for uploads
-    cloud_db_config_path: str = ""  # Path to database config file
 
     def __post_init__(self):
         if self.export_formats is None:
@@ -663,119 +652,6 @@ class ResultsExporter:
             return {}
 
     # ========================================================================
-    # PostgreSQL Cloud Upload Helper Methods
-    # ========================================================================
-
-    def _load_db_config(self, section: str) -> Dict[str, str]:
-        """
-        Load database connection parameters from config file.
-        
-        Args:
-            section: Section name in the config file (e.g., 'cv-database')
-            
-        Returns:
-            Dictionary of connection parameters
-            
-        Raises:
-            Exception: If section not found in config file
-        """
-        config_path = self.config.cloud_db_config_path
-        parser = ConfigParser()
-        parser.read(config_path)
-        
-        db_params = {}
-        if parser.has_section(section):
-            params = parser.items(section)
-            for param in params:
-                db_params[param[0]] = param[1]
-        else:
-            raise Exception(f'Section {section} not found in the {config_path} file')
-        
-        return db_params
-
-    def _upload_to_cloud_db(self, db_section: str, table_name: str, rows: List[Dict]) -> bool:
-        """
-        Insert rows into PostgreSQL database.
-        
-        Args:
-            db_section: Database section name in config file
-            table_name: Target table name
-            rows: List of dictionaries representing rows to insert
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        if not PSYCOPG2_AVAILABLE:
-            self.logger.warning("psycopg2 not installed - skipping cloud upload")
-            return False
-        
-        if not rows:
-            self.logger.debug("No rows to upload to cloud database")
-            return True
-        
-        conn = None
-        cursor = None
-        try:
-            params = self._load_db_config(section=db_section)
-            conn = psycopg2.connect(**params)
-            cursor = conn.cursor()
-            
-            for row in rows:
-                columns = ', '.join(row.keys())
-                values = ', '.join(['%s'] * len(row))
-                query = f"INSERT INTO {table_name} ({columns}) VALUES ({values})"
-                cursor.execute(query, list(row.values()))
-            
-            conn.commit()
-            self.logger.info(f"Cloud upload successful: {len(rows)} rows inserted into {table_name}")
-            return True
-            
-        except Exception as error:
-            self.logger.error(f"Error uploading to PostgreSQL: {error}")
-            return False
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-                self.logger.debug("PostgreSQL connection closed")
-
-    def _prepare_events_for_cloud(self, event_list: List[Dict]) -> List[Dict]:
-        """
-        Prepare event data for cloud upload by dropping/renaming columns and rounding values.
-        
-        Args:
-            event_list: List of event dictionaries
-            
-        Returns:
-            List of cleaned/transformed event dictionaries for cloud upload
-        """
-        if not event_list:
-            return []
-        
-        # Convert to DataFrame for easier manipulation
-        cloud_df = pd.DataFrame(event_list)
-        
-        # Columns to drop for cloud upload (timestamp is separate from actual_datetime)
-        cloud_drop_cols = ["event_id", "class_id", "speed_units", "segment_id", "confidence", 
-                           "timestamp", "position"]
-        cloud_df = cloud_df.drop(columns=[c for c in cloud_drop_cols if c in cloud_df.columns])
-        
-        # Rename columns for cloud schema
-        cloud_rename_map = {"actual_datetime": "time", "speed": "speed_mph"}
-        cloud_df = cloud_df.rename(columns=cloud_rename_map)
-        
-        # Round and convert numeric columns
-        if "speed_mph" in cloud_df.columns:
-            cloud_df["speed_mph"] = cloud_df["speed_mph"].round().astype("Int64")
-        if "track_id" in cloud_df.columns:
-            cloud_df["track_id"] = pd.to_numeric(cloud_df["track_id"], errors='coerce').round().astype("Int64")
-        if "dwell_seconds" in cloud_df.columns:
-            cloud_df["dwell_seconds"] = np.ceil(pd.to_numeric(cloud_df["dwell_seconds"], errors='coerce')).astype("Int64")
-        
-        return cloud_df.to_dict(orient="records")
-
-    # ========================================================================
     # API Upload Helper Methods (if API URL is configured)
     # ========================================================================
 
@@ -903,29 +779,7 @@ class ResultsExporter:
             self.logger.info(f"Segment {segment_id} event log exported to {len(exported_files)} format(s)")
 
             # ================================================================
-            # Cloud Upload Section (after local export)
-            # Only upload if db name, table name, and config path are all configured
-            # ================================================================
-            if (self.config.cloud_db_name and self.config.cloud_table_name 
-                and self.config.cloud_db_config_path):
-                try:
-                    # Prepare events for cloud upload (drop/rename columns, round values)
-                    cloud_records = self._prepare_events_for_cloud(event_list)
-                    
-                    # Upload to cloud database
-                    upload_success = self._upload_to_cloud_db(
-                        db_section=self.config.cloud_db_name,
-                        table_name=self.config.cloud_table_name,
-                        rows=cloud_records
-                    )
-                    
-                    if upload_success:
-                        exported_files['cloud_db'] = f"{self.config.cloud_db_name}:{self.config.cloud_table_name}"
-                except Exception as cloud_error:
-                    self.logger.error(f"Cloud upload failed for segment {segment_id}: {cloud_error}")
-                    # Continue without failing - local export already succeeded
-            # ================================================================
-            # Cloud API Upload (Refactored)
+            # Cloud API Upload
             # ================================================================
             if self.config.enable_api_upload:
                 self.logger.info("API Upload is CHECKED. Loading .env credentials...")

@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 import psutil
 import importlib
+import socket
+import re
 import pkg_resources
 
 
@@ -904,6 +906,83 @@ def memory_monitor(operation_name: str = "Operation"):
             f"Memory usage for {operation_name}: "
             f"delta={memory_delta:+.2f}MB, peak_delta={peak_delta:+.2f}MB"
         )
+
+
+# ======================== NETWORK UTILITIES ========================
+
+def get_local_subnet() -> str:
+    """
+    Silently detects the local subnet of the machine.
+    Returns: String representing the subnet mask (e.g., '192.168.1.0/24')
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # Doesn't actually connect to the internet, just routes a dummy packet to find the local IP
+        s.connect(('10.255.255.255', 1))
+        local_ip = s.getsockname()[0]
+    except Exception:
+        local_ip = '127.0.0.1'
+    finally:
+        s.close()
+
+    return local_ip.rsplit('.', 1)[0] + '.0/24'
+
+
+def get_available_axis_cameras() -> Dict[str, str]:
+    """
+    Scans the local network for AXIS cameras using nmap and ARP.
+    Returns: Dictionary mapping display names to RTSP URLs
+    """
+    logger = logging.getLogger(__name__)
+    subnet = get_local_subnet()
+    camera_options = {}
+    found_ips = []
+    axis_prefixes = ['00:40:8c', 'ac:cc:8e', 'b8:a4:4f', 'e8:27:25']
+
+    logger.info(f"Scanning local network ({subnet}) for AXIS cameras...")
+
+    # 1. Silent Ping Sweep to wake up devices
+    try:
+        subprocess.run(['nmap', '-sn', subnet], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        logger.warning("nmap is not installed. Camera discovery may be incomplete.")
+    except Exception as e:
+        logger.debug(f"Network sweep encountered an issue: {e}")
+
+    # 2. Read ARP Table
+    try:
+        arp_output = subprocess.check_output(['arp', '-a'], universal_newlines=True)
+        for line in arp_output.splitlines():
+            mac_match = re.search(r'(?:[0-9a-fA-F]{1,2}[:-]){5}[0-9a-fA-F]{1,2}', line)
+            ip_match = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', line)
+
+            if mac_match and ip_match:
+                mac_raw = mac_match.group(0).replace('-', ':').lower()
+                ip = ip_match.group(0)
+
+                # Standardize MAC format
+                mac_parts = [part.zfill(2) for part in mac_raw.split(':')]
+                mac_address = ':'.join(mac_parts)
+
+                if any(mac_address.startswith(prefix) for prefix in axis_prefixes):
+                    if ip not in found_ips:
+                        found_ips.append(ip)
+                        logger.debug(f"Discovered AXIS camera at IP: {ip}, MAC: {mac_address}")
+    except Exception as e:
+        logger.error(f"Failed to read ARP table during camera scan: {e}")
+
+    # 3. Format the Output for the UI
+    for index, ip in enumerate(found_ips):
+        display_name = f"Axis Camera [{index + 1}] [{ip}]"
+        rtsp_url = f"rtsp://root:BWTMSmaster69@{ip}/axis-media/media.amp"
+        camera_options[display_name] = rtsp_url
+
+    if found_ips:
+        logger.info(f"Found {len(found_ips)} AXIS camera(s) on the local network.")
+    else:
+        logger.info("No AXIS cameras found on the local network.")
+
+    return camera_options
 
 
 # ======================== VIDEO UTILITIES ========================

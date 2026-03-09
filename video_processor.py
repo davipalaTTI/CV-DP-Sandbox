@@ -108,10 +108,7 @@ class VideoWorker:
 
         # Each worker gets its own exporter (with cloud upload settings from AppConfig)
         export_config = ExportConfig(
-            enable_api_upload=self.config.enable_api_upload,
-            cloud_db_name=getattr(config, 'cloud_db_name', '') or '',
-            cloud_table_name=getattr(config, 'cloud_table_name', '') or '',
-            cloud_db_config_path=getattr(config, 'cloud_db_config_path', '') or ''
+            enable_api_upload=self.config.enable_api_upload
         )
         self.exporter = ResultsExporter(config.output_folder, export_config)
 
@@ -804,10 +801,7 @@ class VideoProcessor:
 
         # Results exporter (with cloud upload settings from AppConfig)
         export_config = ExportConfig(
-            enable_api_upload=self.config.enable_api_upload,
-            cloud_db_name=getattr(config, 'cloud_db_name', '') or '',
-            cloud_table_name=getattr(config, 'cloud_table_name', '') or '',
-            cloud_db_config_path=getattr(config, 'cloud_db_config_path', '') or ''
+            enable_api_upload=self.config.enable_api_upload
         )
         self.exporter = ResultsExporter(config.output_folder, export_config)
 
@@ -1273,13 +1267,24 @@ class VideoProcessor:
                         self.logger.info("All current videos processed, waiting for new files... (Ctrl+C to stop)")
                         progress.set_status("Waiting for new files... (Ctrl+C to stop)")
                         while video_queue.empty():
-                            time.sleep(2)  # Check every 2 seconds
+                            time.sleep(0.1)  # Small sleep to prevent busy-waiting
+                            progress.keep_responsive()
+
+                            # Check if user manually closed the window while waiting
+                            if progress.is_closed:
+                                self.logger.info("Window closed by user during idle state.")
+                                return {
+                                    "total_videos": len(total_results),
+                                    "video_results": total_results,
+                                    "combined_stats": self._combine_video_stats(total_results)
+                                }
                         self.logger.info("New video detected, resuming processing...")
                     else:
                         break
 
                 # Small sleep to prevent busy-waiting
                 time.sleep(0.1)
+                progress.keep_responsive()
 
         except KeyboardInterrupt:
             self.logger.info("Processing interrupted by user")

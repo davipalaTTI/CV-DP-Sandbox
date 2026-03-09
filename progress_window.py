@@ -364,6 +364,14 @@ class ProgressWindow:
             except tk.TclError:
                 self.is_closed = True
 
+    def keep_responsive(self):
+        """ Pump Tkinter events to keep the window responsive."""
+        if not self.is_closed:
+            try:
+                self.root.update()
+            except tk.TclError:
+                self.is_closed = True
+
     # === Legacy compatibility methods ===
 
     def update_frame_progress(self, current: int, total: int):
