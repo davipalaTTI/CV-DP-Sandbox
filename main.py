@@ -6,6 +6,7 @@ A comprehensive computer vision application for counting objects crossing
 predefined lines and zones using YOLO detection and tracking.
 """
 
+import tensorrt
 import sys
 import logging
 import traceback

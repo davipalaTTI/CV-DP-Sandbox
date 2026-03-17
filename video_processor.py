@@ -950,7 +950,8 @@ class VideoProcessor:
         self._reset_segment()
 
         # Create window + mouse callback for live editing
-        cv2.namedWindow("Live Object Counter")
+        # MUST include WINDOW_NORMAL here so the fit_center function is allowed to resize it!
+        cv2.namedWindow("Live Object Counter", cv2.WINDOW_NORMAL)
         cv2.setMouseCallback("Live Object Counter", self._mouse_callback)
 
         # Frame Bool for window centering
@@ -2933,15 +2934,35 @@ class VideoProcessor:
             self.logger.warning(f"[HEATMAP] flush failed: {e}")
 
     def fit_center(self, name, w, h, frac=0.9):
-        r = tk.Tk();
+        """Scale and center window, safe for headless Jetson environments"""
+        r = tk.Tk()
         r.withdraw()
+
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
+
+        # --- HEADLESS / REMOTE DESKTOP SAFETY ---
+        # If the virtual screen reports a massive size, assume the user
+        # is actually viewing from a standard 1080p laptop monitor.
+        if sw > 3000 or sh > 2000:
+            sw = 1920
+            sh = 1080
+
+        # Calculate scaling factor to fit within the screen fraction
         s = min((sw * frac) / w, (sh * frac) / h, 1.0)
+
+        # Apply scaling to get new width and height
         nw, nh = int(w * s), int(h * s)
-        x, y = (sw - nw) // 2, (sh - nh) // 2
+
+        # Center coordinates
+        x, y = max(0, (sw - nw) // 2), max(0, (sh - nh) // 2)
+
+        # Apply the sizing and positioning
         cv2.namedWindow(name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(name, nw, nh)
         cv2.moveWindow(name, x, y)
+
+        # Clean up the invisible Tkinter instance
+        r.destroy()
 
     def _background_append_task(self, new_events: List, segment_id: str, video_name: str):
         """ Background thread to append events to master log without blocking."""

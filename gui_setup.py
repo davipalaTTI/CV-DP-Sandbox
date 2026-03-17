@@ -219,10 +219,14 @@ class InteractiveGUI:
     def _run_interactive_loop(self):
         """Run the main interactive loop"""
         window_name = "Setup - Draw Lines and Zones"
-        cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)  # Changed from AUTOSIZE to NORMAL
+
+        # Force it to match the preview frame size before centering
+        h, w = self.preview_frame.shape[:2]
+        cv2.resizeWindow(window_name, w, h)
+
         self._center_cv2_window(window_name)
         cv2.setMouseCallback("Setup - Draw Lines and Zones", self._mouse_callback)
-
         while not self.state.confirmed:
             # Create display canvas
             canvas = self.preview_frame.copy()
@@ -919,19 +923,21 @@ class InteractiveGUI:
     def _center_cv2_window(self, window_name: str):
         """Center an OpenCV window on the primary screen."""
         try:
-            # Size of the preview image (what the window will roughly be)
             h, w = self.preview_frame.shape[:2]
 
-            # Use Tk to get screen size
             root = tk.Tk()
             root.withdraw()
             screen_w = root.winfo_screenwidth()
             screen_h = root.winfo_screenheight()
             root.destroy()
 
-            # Top-left corner so the window is centered
-            x = (screen_w - w) // 2
-            y = (screen_h - h) // 2
+            # --- HEADLESS SAFETY ---
+            if screen_w > 3000 or screen_h > 2000:
+                screen_w = 1920
+                screen_h = 1080
+
+            x = max(0, (screen_w - w) // 2)
+            y = max(0, (screen_h - h) // 2)
 
             cv2.moveWindow(window_name, x, y)
         except Exception as e:
@@ -976,12 +982,17 @@ class LinePropertiesDialog:
         except Exception:
             pass
 
-        # Center on screen (parent is withdrawn)
-        sw = self.dialog.winfo_screenwidth()
-        sh = self.dialog.winfo_screenheight()
-        x = (sw // 2) - 200
-        y = (sh // 2) - 250
-        self.dialog.geometry(f"540x640+{x}+{y}")
+            # Center on screen (parent is withdrawn)
+            sw = self.dialog.winfo_screenwidth()
+            sh = self.dialog.winfo_screenheight()
+
+            if sw > 3000 or sh > 2000:
+                sw = 1920
+                sh = 1080
+
+            x = max(0, (sw // 2) - 200)
+            y = max(0, (sh // 2) - 250)
+            self.dialog.geometry(f"540x640+{x}+{y}")
 
         # --- Direction selection ---
         direction_var = tk.StringVar(master=self.dialog, value="up")
@@ -1094,8 +1105,14 @@ class ZonePropertiesDialog:
         except Exception:
             pass
         sw, sh = self.dialog.winfo_screenwidth(), self.dialog.winfo_screenheight()
-        self.dialog.geometry(f"580x580+{(sw // 2) - 200}+{(sh // 2) - 200}")
 
+        if sw > 3000 or sh > 2000:
+            sw = 1920
+            sh = 1080
+
+        x = max(0, (sw // 2) - 290)
+        y = max(0, (sh // 2) - 290)
+        self.dialog.geometry(f"580x580+{x}+{y}")
         class_frame = tk.LabelFrame(self.dialog, text="Classes to Count in Zone")
         class_frame.pack(fill="both", expand=True, padx=10, pady=5)
 

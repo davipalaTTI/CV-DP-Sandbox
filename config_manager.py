@@ -163,10 +163,13 @@ class ConfigManager:
         root.title("Multi-Line Counter - Configuration")
         root.resizable(True, True)
 
-        # --- TASKBAR SAFETY: Dynamic Height ---
+        # --- HEADLESS / REMOTE DESKTOP SAFETY ---
         screen_h = root.winfo_screenheight()
-        # Set height to 85% of screen height to ensure buttons are above taskbar
-        win_h = min(850, int(screen_h * 0.85))
+        # If the screen reports an absurdly large virtual height, force a safe default of 750px
+        if screen_h > 2000 or screen_h < 600:
+            win_h = 750
+        else:
+            win_h = min(850, int(screen_h * 0.85))
         root.geometry(f"650x{win_h}")
 
         # --- REPAIRED SCROLLBAR SETUP ---
@@ -1050,8 +1053,7 @@ class ConfigManager:
         )
 
     def center_window(self, window):
-        """Center the window relative to the area above the taskbar"""
-
+        """Center the window relative to the area above the taskbar, safe for headless."""
         window.update_idletasks()
 
         window_width = window.winfo_width()
@@ -1059,21 +1061,15 @@ class ConfigManager:
         screen_width = window.winfo_screenwidth()
         screen_height = window.winfo_screenheight()
 
-        # Estimate the "Usable Area" height (95% of screen height)
-        # This effectively ignores the bottom 5% where the Taskbar usually sits.
+        # Headless fallback: If the virtual screen is massive, assume a standard 1080p viewer
+        if screen_width > 3000 or screen_height > 2000:
+            screen_width = 1920
+            screen_height = 1080
+
         usable_height = screen_height * 0.95
+        x = max(0, (screen_width - window_width) // 2)
+        y = max(0, int((usable_height - window_height) // 2))
 
-        # Horizontal Center
-        x = (screen_width - window_width) // 2
-
-        # Vertical Center (relative to usable_height)
-        y = int((usable_height - window_height) // 2)
-
-        # Safety: Ensure it doesn't go off the top of the screen
-        if y < 0:
-            y = 0
-
-        # Apply the new coordinates (+x+y moves the window without changing size)
         window.geometry(f"+{x}+{y}")
 
 def resolve_colormap(name: str) -> int:

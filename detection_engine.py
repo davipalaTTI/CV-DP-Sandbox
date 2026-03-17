@@ -1,3 +1,4 @@
+import tensorrt
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -70,8 +71,18 @@ class DetectionEngine:
                 device_str = self.device  # "cuda", "cpu", "mps", etc.
 
             # Load YOLO model (ONNX or PT)
-            self.model = YOLO(self.model_path)
-            self.class_names = self.model.names
+            self.model = YOLO(self.model_path, task = 'detect')
+
+            # Bypass PyTorch's lock by directly assigning the dictionary to our own variable
+            if self.model_path.endswith('.engine'):
+                self.class_names = {
+                    0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane',
+                    5: 'bus', 6: 'train', 7: 'truck', 8: 'boat', 9: 'traffic light',
+                    10: 'fire hydrant', 11: 'stop sign', 12: 'parking meter', 13: 'bench'
+                }
+            else:
+                # Fall back to the model's internal names for .pt or .onnx files
+                self.class_names = self.model.names
 
             suffix = Path(self.model_path).suffix.lower()
 

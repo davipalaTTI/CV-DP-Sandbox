@@ -18,3 +18,4 @@
 !folder_monitor.py
 !cleanup_footage.py
 !requirements.txt
+!cuda_test.py

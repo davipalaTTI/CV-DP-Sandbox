@@ -705,7 +705,7 @@ class ResultsExporter:
             df["track_id"] = pd.to_numeric(df["track_id"], errors='coerce').round().astype("Int64")
         if "dwell_seconds" in df.columns:
             df["dwell_seconds"] = pd.to_numeric(df["dwell_seconds"], errors='coerce').fillna(0)
-            df["dwell_seconds"] = np.ceil(df["dwell_seconds"]).astype("Int64")
+            df["dwell_seconds"] = np.ceil(df["dwell_seconds"]).astype(int)
 
         # 5. Clean for JSON serialization (replace NaN with None)
         df = df.replace({np.nan: None, np.inf: None, -np.inf: None})
