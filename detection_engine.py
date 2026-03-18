@@ -143,7 +143,7 @@ class DetectionEngine:
                 'persist': persist_tracks,
                 'conf': self.confidence_threshold,
                 'verbose': False,
-                'tracker': self.tracker_config if self.tracker_config else 'botsort.yaml'
+                'tracker': self.tracker_config if self.tracker_config else 'bytetrack.yaml'
             }
 
             # Add class filtering if specified

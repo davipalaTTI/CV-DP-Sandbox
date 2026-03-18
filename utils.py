@@ -1646,9 +1646,7 @@ class HeatmapAccumulator:
     Accumulates object presence over a time window using detection boxes/points.
     Produces a single overlay snapshot per interval, then resets.
 
-    Works two ways:
-      • call update_*() each frame and let maybe_emit(...) time out and save; or
-      • call render_and_save(...) yourself (e.g., on segment rollover) to flush immediately.
+    Optimized with NumPy Vectorization for high-performance Jetson deployment.
     """
 
     def __init__(
@@ -1660,7 +1658,7 @@ class HeatmapAccumulator:
             interval_sec: float = 10.0,
             radius_px: int = 10,
             decay: float = 0.0,
-            gamma: float = 1.6,  # Make sure this parameter exists
+            gamma: float = 1.6,
             saturation_boost: float = 1.0
     ) -> None:
         self.h, self.w = frame_size
@@ -1669,13 +1667,27 @@ class HeatmapAccumulator:
         self.interval_sec = float(interval_sec)
         self.radius_px = int(max(0, radius_px))
         self.decay = float(max(0.0, min(1.0, decay)))
-        self.gamma = float(max(0.1, gamma))  # Store gamma properly
+        self.gamma = float(max(0.1, gamma))
         self.saturation_boost = float(max(1.0, saturation_boost))
         self.accum = np.zeros((self.h, self.w), dtype=np.float32)
         self.last_emit_t = time.time()
 
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- PRECOMPUTE THE GAUSSIAN KERNEL ---
+        # Instead of calculating pixel distance thousands of times per frame,
+        # we calculate the perfect glowing dot once and stamp it later.
+        if self.radius_px > 0:
+            r = self.radius_px
+            size = 2 * r + 1
+            y, x = np.ogrid[-r:r + 1, -r:r + 1]
+            dist_sq = x * x + y * y
+            mask = dist_sq <= r * r
+            sigma = r / 3.0
+            kernel = np.exp(-dist_sq / (2 * sigma * sigma))
+            self._kernel = (kernel * mask).astype(np.float32)
+            self._kernel_size = size
 
     # -------------------- core state --------------------
 
@@ -1692,70 +1704,79 @@ class HeatmapAccumulator:
 
     def update_from_boxes(self, boxes_xyxy: Iterable[Tuple[int, int, int, int]], weight: float = 1.5) -> None:
         """
-        Add heat from bounding boxes with gaussian-like falloff for smoother blending
+        Add heat from bounding boxes using ultra-fast NumPy matrix slicing
         """
         self._apply_decay()
         if not boxes_xyxy:
             return
 
-        w = self.w
-        h = self.h
+        w, h = self.w, self.h
         wgt = float(max(0.0, weight))
 
         if self.radius_px > 0:
-            # Use gaussian-like kernel for smoother overlaps
+            # Pre-scale the master kernel by the weight
+            scaled_kernel = self._kernel * wgt
+            r = self.radius_px
+            k_size = self._kernel_size
+
             for (x1, y1, x2, y2) in boxes_xyxy:
                 cx = int(0.5 * (x1 + x2))
                 cy = int(0.5 * (y1 + y2))
 
-                if 0 <= cx < w and 0 <= cy < h:
-                    # Create gaussian kernel for smoother blending
-                    radius = self.radius_px
-                    y_min = max(0, cy - radius)
-                    y_max = min(h, cy + radius + 1)
-                    x_min = max(0, cx - radius)
-                    x_max = min(w, cx + radius + 1)
+                # Target bounds on the master image
+                y_min, y_max = cy - r, cy + r + 1
+                x_min, x_max = cx - r, cx + r + 1
 
-                    for y in range(y_min, y_max):
-                        for x in range(x_min, x_max):
-                            dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-                            if dist <= radius:
-                                # Gaussian-like falloff
-                                intensity = wgt * np.exp(-(dist ** 2) / (2 * (radius / 3) ** 2))
-                                self.accum[y, x] += intensity
+                # Clip bounds to ensure we don't stamp outside the screen
+                valid_y_min, valid_y_max = max(0, y_min), min(h, y_max)
+                valid_x_min, valid_x_max = max(0, x_min), min(w, x_max)
+
+                # Calculate the exact slice of the stamp we need
+                k_y_min = valid_y_min - y_min
+                k_y_max = k_size - (y_max - valid_y_max)
+                k_x_min = valid_x_min - x_min
+                k_x_max = k_size - (x_max - valid_x_max)
+
+                # Instantly stamp the matrix at C-level speed
+                if valid_y_max > valid_y_min and valid_x_max > valid_x_min:
+                    self.accum[valid_y_min:valid_y_max, valid_x_min:valid_x_max] += \
+                        scaled_kernel[k_y_min:k_y_max, k_x_min:k_x_max]
         else:
-            # Fill rectangles with gradient for overlap emphasis
+            # Vectorized gradient filling for bounding boxes
             for (x1, y1, x2, y2) in boxes_xyxy:
                 x1 = int(max(0, min(w - 1, x1)))
                 y1 = int(max(0, min(h - 1, y1)))
                 x2 = int(max(0, min(w - 1, x2)))
                 y2 = int(max(0, min(h - 1, y2)))
 
-                if x2 > x1 and y2 > y1:
-                    # Add with slight center weighting
-                    box_w = x2 - x1
-                    box_h = y2 - y1
-                    cx = (x1 + x2) // 2
-                    cy = (y1 + y2) // 2
+                box_w, box_h = x2 - x1, y2 - y1
 
-                    for y in range(y1, y2):
-                        for x in range(x1, x2):
-                            # Distance from center normalized
-                            dx = abs(x - cx) / max(box_w / 2, 1)
-                            dy = abs(y - cy) / max(box_h / 2, 1)
-                            center_weight = 1.0 - 0.3 * max(dx, dy)  # Slight center emphasis
-                            self.accum[y, x] += wgt * center_weight
+                if box_w > 0 and box_h > 0:
+                    cx_rel, cy_rel = box_w / 2.0, box_h / 2.0
+
+                    # Create 1D distance arrays
+                    x_idx = np.arange(box_w)
+                    y_idx = np.arange(box_h)
+
+                    # Normalize distances
+                    dx = np.abs(x_idx - cx_rel) / max(cx_rel, 1.0)
+                    dy = np.abs(y_idx - cy_rel) / max(cy_rel, 1.0)
+
+                    # Create 2D weight matrix via NumPy broadcasting (dy as column, dx as row)
+                    center_weight = 1.0 - 0.3 * np.maximum(dy[:, None], dx[None, :])
+
+                    self.accum[y1:y2, x1:x2] += wgt * center_weight
 
     def update_from_points(self, points_xy: Iterable[Tuple[int, int]], weight: float = 1.0) -> None:
         """
-        Optional helper: add heat from a list of points (x, y). Uses radius_px; if radius_px == 0 uses a 1px dot.
+        Add heat from a list of points using OpenCV's optimized C++ drawing
         """
         self._apply_decay()
         if not points_xy:
             return
 
         wgt = float(max(0.0, weight))
-        r = max(1, self.radius_px)  # at least 1px dot
+        r = max(1, self.radius_px)
 
         for (x, y) in points_xy:
             if 0 <= x < self.w and 0 <= y < self.h:
@@ -1773,17 +1794,9 @@ class HeatmapAccumulator:
         if vmax <= 0:
             return np.zeros_like(heat, dtype=np.uint8)
 
-        # Normalize
         norm = heat / vmax
-
-        # Apply gamma correction for enhanced contrast
         norm = np.power(norm, 1.0 / self.gamma)
-
-        # Apply sigmoid-like curve to enhance mid-tones
-        # This makes moderately hot areas more visible
         norm = 1.0 / (1.0 + np.exp(-10 * (norm - 0.3)))
-
-        # Scale to 8-bit
         heat_u8 = (255.0 * norm).astype(np.uint8)
 
         return heat_u8
@@ -1793,7 +1806,6 @@ class HeatmapAccumulator:
         heat_u8 = self._make_colormap()
         color_map = cv2.applyColorMap(heat_u8, self.colormap)
 
-        # Boost saturation for more vibrant colors
         if self.saturation_boost > 1.0:
             hsv = cv2.cvtColor(color_map, cv2.COLOR_BGR2HSV).astype(np.float32)
             hsv[:, :, 1] = np.clip(hsv[:, :, 1] * self.saturation_boost, 0, 255)
@@ -1802,54 +1814,36 @@ class HeatmapAccumulator:
         if frame_bgr is None:
             base = np.zeros((self.h, self.w, 3), dtype=np.uint8)
         else:
-            # Resize if needed
             if frame_bgr.shape[0] != self.h or frame_bgr.shape[1] != self.w:
                 color_map = cv2.resize(color_map, (frame_bgr.shape[1], frame_bgr.shape[0]),
                                        interpolation=cv2.INTER_LINEAR)
             base = frame_bgr
 
-        # Use screen blending for more vibrant overlay
-        # This brightens overlapping areas more dramatically
-        inv_alpha = 1.0 - self.alpha
-
-        # Screen blend mode: 1 - (1-A)*(1-B)
         base_norm = base.astype(np.float32) / 255.0
         color_norm = color_map.astype(np.float32) / 255.0
-
         screen_blend = 1.0 - (1.0 - base_norm) * (1.0 - color_norm * self.alpha)
-        overlay = (screen_blend * 255).astype(np.uint8)
 
-        return overlay
+        return (screen_blend * 255).astype(np.uint8)
 
     def render_and_save(
             self,
             frame_bgr: Optional[np.ndarray],
             label: Optional[str] = None,
             when: Optional[float] = None,
-            suffix: Optional[str] = None,  # keep this since _flush_heatmap may pass suffix="final"
+            suffix: Optional[str] = None,
     ) -> str:
-        """
-        Immediately render the current heatmap over `frame_bgr` and write a PNG.
-        Filename: heatmap_Year_day_month_HHMM_to_HHMM[_{label}][_{suffix}].png
-        Uses the previous emit time as the start of the window.
-        Resets the accumulator and updates last_emit_t. Returns the file path (str).
-        """
-        # Normalize end time
+        """Render heatmap and write to PNG"""
         t_now = self._as_timestamp(when)
-
-        # Use last emit as window start; if none, approximate by interval length
         start_t = getattr(self, "last_emit_t", None)
         if start_t is None:
             start_t = t_now - float(getattr(self, "interval_sec", 0) or 0)
-        # Normalize start time (in case someone set a datetime here)
-        start_t = self._as_timestamp(start_t)
 
+        start_t = self._as_timestamp(start_t)
         start_dt = datetime.fromtimestamp(start_t)
         end_dt = datetime.fromtimestamp(t_now)
 
         overlay_bgr = self.make_overlay(frame_bgr)
 
-        # Build short, Windows-safe filename stem: heatmap_YYYY_DD_MM_HHMM_to_HHMM
         date_part = start_dt.strftime("%Y_%d_%m")
         stem = f"heatmap_{date_part}_{start_dt.strftime('%H%M')}_to_{end_dt.strftime('%H%M')}"
 
@@ -1864,10 +1858,8 @@ class HeatmapAccumulator:
         if not ok:
             raise RuntimeError(f"cv2.imwrite failed for '{out_path}'")
 
-        # Store as float timestamp (not datetime) to avoid future type issues
         self.last_emit_t = float(t_now)
         self.reset()
-
         return str(out_path)
 
     def maybe_emit(
@@ -1876,15 +1868,10 @@ class HeatmapAccumulator:
             t_now: Optional[float] = None,
             label: Optional[str] = None
     ) -> Optional[str]:
-        """
-        If the interval has elapsed since the last emit, render+save and reset.
-        Returns the output file path (str) when it emits, else None.
-        """
         t_now = self._as_timestamp(t_now)
-
         last = getattr(self, "last_emit_t", None)
+
         if last is None:
-            # initialize timer on first run
             self.last_emit_t = float(t_now)
             return None
 
@@ -1893,8 +1880,6 @@ class HeatmapAccumulator:
             return self.render_and_save(frame_bgr=frame_bgr, label=label, when=t_now)
 
         return None
-
-    # -------------------- small helpers --------------------
 
     def _as_timestamp(self, t) -> float:
         if t is None:
@@ -1908,18 +1893,12 @@ class HeatmapAccumulator:
         raise TypeError(f"Expected timestamp float/int or datetime/date, got {type(t)}")
 
     def set_interval_minutes(self, minutes: int) -> None:
-        """Convenience: set emission interval in minutes."""
         self.interval_sec = max(1.0, float(minutes) * 60.0)
 
     def set_colormap(self, colormap: int) -> None:
-        """Update the OpenCV colormap enum."""
         self.colormap = int(colormap)
 
     def _build_filename(self, start_dt, end_dt, suffix: str = "") -> str:
-        """
-        Return filename stem: heatmap_Year_day_month_HHMM_to_HHMM (+ optional suffix)
-        Example: heatmap_2025_19_09_1025_to_1058[_final]
-        """
         date_part = start_dt.strftime("%Y_%d_%m")
         t_start = start_dt.strftime("%H%M")
         t_end = end_dt.strftime("%H%M")
