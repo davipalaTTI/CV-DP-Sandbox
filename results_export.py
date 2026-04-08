@@ -29,6 +29,7 @@ from configparser import ConfigParser
 import requests
 import os
 from dotenv import load_dotenv
+import math
 
 
 
@@ -433,6 +434,19 @@ class ResultsExporter:
         if self.config.enable_master_log:
             self.logger.info(f"Master event log: {self.master_log_path}")
 
+    def _sanitize_for_json(self, data):
+        """Recursively hunts down NaN/Infinity values and converts them to None for safe JSON transport"""
+        import math
+        if isinstance(data, dict):
+            return {k: self._sanitize_for_json(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._sanitize_for_json(v) for v in data]
+        elif isinstance(data, float):
+            if math.isnan(data) or math.isinf(data):
+                return None
+            return data
+        return data
+
     def _initialize_master_log(self):
         """Initialize the master event log Excel file if it doesn't exist"""
         if not self.master_json_path.exists():
@@ -665,7 +679,10 @@ class ResultsExporter:
         }
 
         try:
-            response = requests.post(api_url, json=payload, headers=headers, timeout=15)
+            # Catch any rogue NaNs that Pandas missed before sending!
+            safe_payload = self._sanitize_for_json(payload)
+
+            response = requests.post(api_url, json=safe_payload, headers=headers, timeout=15)
 
             if response.status_code == 200:
                 self.logger.info(f"Cloud API: Successfully uploaded {len(payload)} records.")

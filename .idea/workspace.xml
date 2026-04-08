@@ -4,11 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="Edge Compute Base 3-17-2026">
+    <list default="true" id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="Edge Compute Base 3-18-2026">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/detection_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/detection_engine.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/results_export.py" beforeDir="false" afterPath="$PROJECT_DIR$/results_export.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/video_processor.py" beforeDir="false" afterPath="$PROJECT_DIR$/video_processor.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -85,6 +84,7 @@
       <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="true" />
       <option name="RUN_TOOL" value="" />
       <option name="SCRIPT_NAME" value="$PROJECT_DIR$/main.py" />
       <option name="PARAMETERS" value="" />
@@ -220,7 +220,15 @@
       <option name="project" value="LOCAL" />
       <updated>1771610561686</updated>
     </task>
-    <option name="localTasksCounter" value="14" />
+    <task id="LOCAL-00014" summary="Edge Compute Base 3-18-2026">
+      <option name="closed" value="true" />
+      <created>1773852644385</created>
+      <option name="number" value="00014" />
+      <option name="presentableId" value="LOCAL-00014" />
+      <option name="project" value="LOCAL" />
+      <updated>1773852644385</updated>
+    </task>
+    <option name="localTasksCounter" value="15" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -243,7 +251,8 @@
     <MESSAGE value="Trase Updated Files&#10;2 11 2026 TH" />
     <MESSAGE value="DP API Upload Update" />
     <MESSAGE value="Edge Compute Base 3-17-2026" />
-    <option name="LAST_COMMIT_MESSAGE" value="Edge Compute Base 3-17-2026" />
+    <MESSAGE value="Edge Compute Base 3-18-2026" />
+    <option name="LAST_COMMIT_MESSAGE" value="Edge Compute Base 3-18-2026" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>
