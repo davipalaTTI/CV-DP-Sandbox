@@ -4,9 +4,9 @@
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/logs" />
-      <excludeFolder url="file://$MODULE_DIR$/yolo_logs" />
+      <excludeFolder url="file://$MODULE_DIR$/output/yolo_logs" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.10 (CV-DP-Sandbox) (2)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Python 3.9 (CV-DP-Sandbox)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

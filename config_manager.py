@@ -18,7 +18,7 @@ from typing import List, Tuple, Dict, Optional, Set, Union
 import logging
 import cv2
 from enum import Enum
-from utils import get_available_axis_cameras
+from utils.utils import get_available_axis_cameras
 
 
 class InputType(Enum):

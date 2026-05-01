@@ -6,7 +6,6 @@ A comprehensive computer vision application for counting objects crossing
 predefined lines and zones using YOLO detection and tracking.
 """
 
-import tensorrt
 import sys
 import logging
 import traceback
@@ -15,10 +14,10 @@ from typing import Optional
 import cv2
 # Import our modules
 from config_manager import ConfigManager, AppConfig
-from gui_setup import InteractiveGUI
-from detection_engine import DetectionEngine
-from video_processor import VideoProcessor
-from utils import setup_logging, check_dependencies
+from gui.gui_setup import InteractiveGUI
+from core.detection_engine import DetectionEngine
+from core.video_processor import VideoProcessor
+from utils.utils import setup_logging, check_dependencies
 
 __version__ = "1.0.1"
 __author__ = "TH"

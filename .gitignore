@@ -6,16 +6,16 @@
 
 # Track only these project files
 !config_manager.py
-!counter_logic.py
-!detection_engine.py
-!gui_setup.py
+!core/counter_logic.py
+!core/detection_engine.py
+!gui/gui_setup.py
 !main.py
-!progress_window.py
-!results_export.py
-!training_mode.py
-!utils.py
-!video_processor.py
-!folder_monitor.py
-!cleanup_footage.py
+!gui/progress_window.py
+!utils/results_export.py
+!core/training_mode.py
+!utils/utils.py
+!core/video_processor.py
+!scripts/folder_monitor.py
+!scripts/cleanup_footage.py
 !requirements.txt
-!cuda_test.py
+!scripts/cuda_test.py
