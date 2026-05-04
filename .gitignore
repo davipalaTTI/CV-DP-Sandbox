@@ -1,32 +1,35 @@
-# Ignore everything by default
+# 1. Ignore everything by default
 *
 
-# Don't ignore this .gitignore file
+# 2. Allow directories so Git can look inside them for whitelisted files
+!*/
+
+# 3. Don't ignore this .gitignore file
 !.gitignore
 
-# Track Root Files
+# 4. Track Root Files
 !main.py
 !config_manager.py
 !requirements.txt
 
-# Track Core Application Logic
+# 5. Track Core Application Logic
 !core/__init__.py
 !core/counter_logic.py
 !core/detection_engine.py
 !core/video_processor.py
 !core/training_mode.py
 
-# Track GUI Components
+# 6. Track GUI Components
 !gui/__init__.py
 !gui/gui_setup.py
 !gui/progress_window.py
 
-# Track Utilities
+# 7. Track Utilities
 !utils/__init__.py
 !utils/results_export.py
 !utils/utils.py
 
-# Track Auxiliary Scripts
+# 8. Track Auxiliary Scripts
 !scripts/folder_monitor.py
 !scripts/cleanup_footage.py
 !scripts/cuda_test.py
