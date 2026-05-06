@@ -10,18 +10,22 @@ import sys
 import logging
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 import cv2
 # Import our modules
-from config_manager import ConfigManager, AppConfig
+from utils.logger import stop_logging, setup_logging
+from config_manager import AppConfig
 from gui.gui_setup import InteractiveGUI
+from gui.startup_window import StartupWindow
 from core.detection_engine import DetectionEngine
-from core.video_processor import VideoProcessor
-from utils.utils import setup_logging, check_dependencies
+from core.video_processing.camera_runner import CameraRunner
+from core.video_processing.batch_runner import BatchRunner
+from utils.profiling import run_with_profiling, run_with_memory_profiling
+from utils.system_checks import check_dependencies
+from utils.cli_parser import parse_arguments
 
 __version__ = "1.0.1"
 __author__ = "TH"
-
 
 class Application:
     """Main application class that orchestrates all components"""
@@ -29,7 +33,7 @@ class Application:
     def __init__(self):
         self.config: Optional[AppConfig] = None
         self.detection_engine: Optional[DetectionEngine] = None
-        self.video_processor: Optional[VideoProcessor] = None
+        self.video_processor: Optional[Union[CameraRunner, BatchRunner]] = None
         self.logger = logging.getLogger(__name__)
 
     # In main.py, replace the initialize method in the Application class:
@@ -48,7 +52,7 @@ class Application:
         try:
             self.logger.info(f"Starting Multi-Line Object Counter v{__version__}")
 
-            config_manager = ConfigManager()
+            config_manager = StartupWindow()
 
             # Try to load config from file if provided
             if config_file and Path(config_file).exists():
@@ -182,12 +186,20 @@ class Application:
             self.logger.info(f"  Zones configured: {len(self.config.zones_config)}")
             self.logger.info(f"  Exclusion zones: {len(self.config.exclusion_zones)}")
 
-            # Initialize video processor
-            self.logger.info("Step 4: Initializing video processor...")
-            self.video_processor = VideoProcessor(
-                config=self.config,
-                detection_engine=self.detection_engine
-            )
+            # Initialize the correct video runner based on config
+            self.logger.info("Step 4: Initializing video runner...")
+            if self.config.is_camera:
+                self.logger.info("Setting up CameraRunner for live feed.")
+                self.video_processor = CameraRunner(
+                    config=self.config,
+                    detection_engine=self.detection_engine
+                )
+            else:
+                self.logger.info("Setting up BatchRunner for file/folder processing.")
+                self.video_processor = BatchRunner(
+                    config=self.config,
+                    detection_engine=self.detection_engine
+                )
 
             self.logger.info("Application initialization completed successfully")
             return True
@@ -243,7 +255,6 @@ class Application:
         except Exception as e:
             self.logger.warning(f"Cleanup error: {e}")
 
-
 def print_banner():
     """Print application banner"""
     banner = f"""
@@ -258,71 +269,25 @@ def print_banner():
     """
     print(banner)
 
-
-def parse_arguments():
-    """Parse command line arguments"""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Multi-Line Object Counter",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python main.py                          # Interactive mode
-  python main.py --config config.json    # Load from config file
-  python main.py --debug                 # Enable debug logging
-        """
-    )
-
-    parser.add_argument(
-        '--config', '-c',
-        type=str,
-        help='Load configuration from file'
-    )
-
-    parser.add_argument(
-        '--debug', '-d',
-        action='store_true',
-        help='Enable debug logging'
-    )
-
-    parser.add_argument(
-        '--log-file', '-l',
-        type=str,
-        help='Log file path (default: logs/app.log)'
-    )
-
-    parser.add_argument(
-        '--version', '-v',
-        action='version',
-        version=f'Multi-Line Object Counter v{__version__}'
-    )
-
-    parser.add_argument(
-        '--no-gui',
-        action='store_true',
-        help='Skip interactive GUI setup (requires config file)'
-    )
-
-    return parser.parse_args()
-
-
-def main() -> int:
+def main(config_file: str = None, skip_gui: bool = False, debug: bool = False, log_file: str = None) -> int:
     """
     Main entry point
 
     Returns:
         Exit code (0 for success, non-zero for error)
     """
-    args = parse_arguments()
+    # DELETED: args = parse_arguments() <-- We don't need this inside the function anymore!
 
     # Print banner
-    print_banner()
+    try:
+        print_banner()
+    except NameError:
+        pass # Just in case print_banner isn't imported in your current snippet
 
-    # Setup logging
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    log_file = args.log_file or "logs/app.log"
-    setup_logging(level=log_level, log_file=log_file)
+    # Setup logging using the variables passed into the function
+    log_level = logging.DEBUG if debug else logging.INFO
+    log_file_path = log_file or "logs/app.log"
+    setup_logging(level=log_level, log_file=log_file_path)
 
     logger = logging.getLogger(__name__)
 
@@ -339,9 +304,9 @@ def main() -> int:
         # Create application instance
         app = Application()
 
-        # Check for config file and no-gui flag
-        config_file = args.config
-        skip_gui = args.no_gui
+        # DELETED: config_file = args.config
+        # DELETED: skip_gui = args.no_gui
+        # We don't need these because they are already passed into the function!
 
         # Validate no-gui usage
         if skip_gui and not config_file:
@@ -373,58 +338,42 @@ def main() -> int:
         return 1
     finally:
         # Ensure logging queue is flushed before exit
-        from utils import stop_logging
-        stop_logging()
-
-
-# Development and debugging helpers
-def run_with_profiling():
-    """Run with performance profiling enabled"""
-    import cProfile
-    import pstats
-    from io import StringIO
-
-    profiler = cProfile.Profile()
-    profiler.enable()
-
-    exit_code = main()
-
-    profiler.disable()
-
-    # Print profiling results
-    stats_stream = StringIO()
-    stats = pstats.Stats(profiler, stream=stats_stream).sort_stats('cumulative')
-    stats.print_stats(20)  # Top 20 functions
-
-    print("\n" + "=" * 80)
-    print("PERFORMANCE PROFILING RESULTS")
-    print("=" * 80)
-    print(stats_stream.getvalue())
-
-    return exit_code
-
-
-def run_with_memory_profiling():
-    """Run with memory profiling enabled"""
-    try:
-        from memory_profiler import profile
-
-        # Wrap main function with memory profiler
-        profiled_main = profile(main)
-        return profiled_main()
-
-    except ImportError:
-        print("memory_profiler not installed. Install with: pip install memory-profiler")
-        return main()
+        try:
+            # FIXED: Updated the import path to match your new folder structure
+            stop_logging()
+        except ImportError:
+            pass
 
 
 if __name__ == "__main__":
-    # Development mode checks
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "--profile":
-            sys.exit(run_with_profiling())
-        elif sys.argv[1] == "--memory-profile":
-            sys.exit(run_with_memory_profiling())
+    args = parse_arguments()
 
-    # Normal execution
-    sys.exit(main())
+    # Securely grab debug and log_file flags in case they haven't been added to cli_parser yet
+    is_debug = getattr(args, 'debug', False)
+    log_path = getattr(args, 'log_file', None)
+
+    if args.profile:
+        sys.exit(run_with_profiling(
+            main,
+            config_file=args.config,
+            skip_gui=args.no_gui,
+            debug=is_debug,
+            log_file=log_path
+        ))
+
+    elif args.memory_profile:
+        sys.exit(run_with_memory_profiling(
+            main,
+            config_file=args.config,
+            skip_gui=args.no_gui,
+            debug=is_debug,
+            log_file=log_path
+        ))
+
+    else:
+        sys.exit(main(
+            config_file=args.config,
+            skip_gui=args.no_gui,
+            debug=is_debug,
+            log_file=log_path
+        ))

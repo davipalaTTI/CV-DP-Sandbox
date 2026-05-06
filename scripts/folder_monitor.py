@@ -9,7 +9,6 @@ import logging
 from pathlib import Path
 from typing import Set, Callable, List
 from threading import Thread, Event
-from queue import Queue
 
 
 class FolderMonitor:

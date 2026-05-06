@@ -4,8 +4,45 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="DP Updated Files&#10;5 1 2026 Dp&#10;Pre-Edge-Configuration">
+    <list default="true" id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="Refractor Code Base">
+      <change afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/geometry_math.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/tracking/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/tracking/line_math.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/tracking/schemas.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/tracking/tracker.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/tracking/zone_math.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/video_processing/__init__.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/video_processing/async_io.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/video_processing/batch_runner.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/video_processing/camera_runner.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/video_processing/interaction_handler.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/video_processing/stats.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/video_processing/visualizer.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/video_processing/worker.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/core/visualizer_heatmap.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/gui/startup_window.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/utils/cli_parser.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/utils/constants.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/utils/file_io.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/utils/logger.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/utils/network.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/utils/profiling.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/utils/structures.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/utils/system_checks.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/utils/video_utils.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/config_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/config_manager.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/counter_logic.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/detection_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/detection_engine.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/video_processor.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/gui_setup.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/gui_setup.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/progress_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/progress_window.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/folder_monitor.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/folder_monitor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/utils/results_export.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/results_export.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/utils/utils.py" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -21,6 +58,11 @@
   </component>
   <component name="Git.Settings">
     <branch-grouping />
+    <option name="RECENT_BRANCH_BY_REPOSITORY">
+      <map>
+        <entry key="$PROJECT_DIR$" value="master" />
+      </map>
+    </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
   <component name="GitHubPullRequestSearchHistory">{
@@ -43,24 +85,24 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;ASKED_MARK_IGNORED_FILES_AS_EXCLUDED&quot;: &quot;true&quot;,
-    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
-    &quot;Python.main.executor&quot;: &quot;Run&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
-    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
-    &quot;last_opened_file_path&quot;: &quot;C:/Users/D-Palacios/PycharmProjects/CV-DP-Sandbox&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;org.jetbrains.plugins.github.ui.GithubSettingsConfigurable&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ASKED_MARK_IGNORED_FILES_AS_EXCLUDED": "true",
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "Python.main.executor": "Run",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "master",
+    "last_opened_file_path": "C:/Users/D-Palacios/PycharmProjects/CV-DP-Sandbox",
+    "settings.editor.selected.configurable": "preferences.pluginManager"
   },
-  &quot;keyToStringList&quot;: {
-    &quot;com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File&quot;: [
-      &quot;GitIgnore&quot;
+  "keyToStringList": {
+    "com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File": [
+      "GitIgnore"
     ]
   }
-}</component>
+}]]></component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox" />
@@ -99,6 +141,7 @@
     </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="Python.main" />
         <item itemvalue="Python.main" />
       </list>
     </recent_temporary>
@@ -261,7 +304,8 @@
     <MESSAGE value="Trase Updated Files&#10;2 11 2026 TH" />
     <MESSAGE value="DP API Upload Update" />
     <MESSAGE value="DP Updated Files&#10;5 1 2026 Dp&#10;Pre-Edge-Configuration" />
-    <option name="LAST_COMMIT_MESSAGE" value="DP Updated Files&#10;5 1 2026 Dp&#10;Pre-Edge-Configuration" />
+    <MESSAGE value="Refractor Code Base" />
+    <option name="LAST_COMMIT_MESSAGE" value="Refractor Code Base" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>

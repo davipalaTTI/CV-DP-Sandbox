@@ -12,7 +12,7 @@ import tkinter as tk
 from tkinter import ttk
 import threading
 import time
-from typing import Optional, Dict, List
+from typing import Dict
 from dataclasses import dataclass, field
 from collections import deque
 import logging

@@ -120,48 +120,80 @@ class DetectionEngine:
                 f"Allowed classes: {[self.class_names[i] for i in self.allowed_classes]}"
             )
 
+            # ==========================================
+            # NEW: ACTUALLY CALL THE WARMUP ROUTINE
+            # ==========================================
+            self.logger.info("Warming up TensorRT engine...")
+            self.warmup()
+            # ==========================================
+
         except Exception as e:
             self.logger.error(f"Failed to load model {self.model_path}: {e}")
             raise
 
-    def detect_and_track(self,
-                         frame: np.ndarray,
-                         persist_tracks: bool = True) -> List[Detection]:
-        """
-        Run detection and tracking on a frame
-        """
+    def detect_and_track(self, frame: np.ndarray, persist_tracks: bool = True) -> List[Detection]:
+        """Run detection using the optimized TensorRT engine"""
+
         try:
-            # Apply exclusion mask to a COPY for detection only
-            detection_frame = frame  # Use original by default
-
+            # Apply exclusion mask if one exists
             if self.exclusion_mask is not None:
-                # Process a masked copy, but don't modify the original
-                detection_frame = self._apply_exclusion_mask(frame)
+                frame = cv2.bitwise_and(frame, frame, mask=self.exclusion_mask)
 
-            # Run YOLO inference on the masked frame
+            # 1. Build the dictionary of settings
             kwargs = {
                 'persist': persist_tracks,
                 'conf': self.confidence_threshold,
-                'verbose': False,
-                'tracker': self.tracker_config if self.tracker_config else 'bytetrack.yaml'
+                'tracker': self.tracker_config if self.tracker_config else 'bytetrack.yaml',
+
+                # --- The Jetson Orin Nano Speed Flags ---
+                'half': True,  # Prevents slow CPU->GPU FP32 casting
+                'verbose': False,  # Stops console print-spam from blocking the UI thread
+                'imgsz': 640  # Forces static TensorRT memory mapping
             }
 
-            # Add class filtering if specified
-            if self.allowed_classes:
+            # 2. Add class filtering if specified
+            if getattr(self, 'allowed_classes', None):
                 kwargs['classes'] = sorted(list(self.allowed_classes))
 
-            # Add tracker config if specified
-            if self.tracker_config:
-                kwargs['tracker'] = self.tracker_config
+            # 3. Run the high-performance inference
+            results = self.model.track(frame, **kwargs)
 
-            # Run on detection_frame (masked), not original frame
-            results = self.model.track(detection_frame, **kwargs)
+            # 4. Parse the results into our Detection dataclass
+            detections = []
+            if len(results) > 0 and len(results[0].boxes) > 0:
+                boxes = results[0].boxes
 
-            # Parse results - these coordinates are still valid for the original frame
-            detections = self._parse_results(results, frame.shape)
+                # Check if we have tracking IDs
+                has_tracks = boxes.id is not None
 
-            # Store for interpolation
-            self.last_detections = detections
+                for i in range(len(boxes)):
+                    # Get basic box data
+                    x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy()
+                    conf = float(boxes.conf[i])
+                    cls_id = int(boxes.cls[i])
+
+                    # Skip if confidence is too low
+                    if conf < self.confidence_threshold:
+                        continue
+
+                    # Get track ID if available
+                    track_id = int(boxes.id[i]) if has_tracks else None
+
+                    # Calculate center and bottom points for counting logic
+                    cx = int((x1 + x2) / 2)
+                    cy = int((y1 + y2) / 2)
+                    bottom_y = int(y2)
+
+                    # Add to our standard detection list
+                    detections.append(Detection(
+                        track_id=track_id,
+                        class_id=cls_id,
+                        class_name=self.class_names.get(cls_id, f"class_{cls_id}"),
+                        bbox=(x1, y1, x2, y2),
+                        confidence=conf,
+                        center_point=(cx, cy),
+                        bottom_point=(cx, bottom_y)
+                    ))
 
             return detections
 

@@ -11,7 +11,7 @@ Handles the interactive setup phase where users:
 import cv2
 import numpy as np
 from tkinter import messagebox, simpledialog
-from typing import List, Tuple, Dict, Optional, Callable, Set
+from typing import List, Tuple, Dict, Optional
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -802,8 +802,6 @@ class InteractiveGUI:
 
     def _create_exclusion_configs(self) -> List[ExclusionZone]:
         """Convert exclusion configurations to ExclusionZone objects"""
-        from config_manager import ExclusionZone  # Import at top if not already
-
         return [
             ExclusionZone(
                 name=exc["name"],
@@ -1038,7 +1036,6 @@ class LinePropertiesDialog:
         def on_ok():
             selected = [cid for cid, v in class_vars.items() if v.get()]
             if not selected:
-                from tkinter import messagebox
                 messagebox.showwarning("No Classes",
                                        "Please select at least one class to count.",
                                        parent=self.dialog)

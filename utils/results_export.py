@@ -22,6 +22,8 @@ import logging
 import datetime
 import threading
 import time
+import copy
+from dataclasses import asdict
 from queue import Queue, Empty
 from openpyxl import load_workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
@@ -29,6 +31,7 @@ from configparser import ConfigParser
 import requests
 import os
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
 import math
 
 
@@ -423,6 +426,9 @@ class ResultsExporter:
         self.master_log_path = self.output_folder / "master_event_log.xlsx"
         self.master_json_path = self.output_folder / "master_event_log.json"
 
+        # NEW: Create a background worker specifically for file writing
+        self.file_writer_pool = ThreadPoolExecutor(max_workers=2)
+
         # Initialize master log if it doesn't exist
         if self.config.enable_master_log:
             self._initialize_master_log()
@@ -434,9 +440,25 @@ class ResultsExporter:
         if self.config.enable_master_log:
             self.logger.info(f"Master event log: {self.master_log_path}")
 
+    def shutdown(self):
+        """Safely wait for all background writing to finish before exiting"""
+        self.logger.info("Waiting for background file exports to finish saving...")
+
+        # 1. Wait for the segment files (JSON/CSV/Excel) to finish saving
+        self.file_writer_pool.shutdown(wait=True)
+
+        # 2. Wait for the Master Event Log queue to flush
+        try:
+            # Assuming you have the global get_master_log_writer function at the top of the file
+            writer = get_master_log_writer()
+            writer.stop()  # This usually forces the queue to write its remaining items
+        except Exception as e:
+            self.logger.debug(f"Master log writer shutdown notice: {e}")
+
+        self.logger.info("All background exports safely saved to disk!")
+
     def _sanitize_for_json(self, data):
         """Recursively hunts down NaN/Infinity values and converts them to None for safe JSON transport"""
-        import math
         if isinstance(data, dict):
             return {k: self._sanitize_for_json(v) for k, v in data.items()}
         elif isinstance(data, list):
@@ -482,7 +504,6 @@ class ResultsExporter:
             return
 
         # Queue events for background writing (non-blocking)
-        import copy
         events_copy = copy.deepcopy(event_list)
 
         writer = get_master_log_writer()
@@ -507,7 +528,6 @@ class ResultsExporter:
             return
         
         # Queue updates for background processing (non-blocking)
-        import copy
         updates_copy = copy.deepcopy(zone_updates)
         
         writer = get_master_log_writer()
@@ -562,7 +582,6 @@ class ResultsExporter:
                 event_dicts.append(d)
             elif hasattr(evt, '__dataclass_fields__'):
                 # Dataclass - convert to dict
-                from dataclasses import asdict
                 d = asdict(evt)
                 # Convert datetime to string if present
                 if 'actual_datetime' in d and d['actual_datetime']:
@@ -646,7 +665,6 @@ class ResultsExporter:
                 stats = results.get('stats')
                 if stats:
                     if hasattr(stats, '__dataclass_fields__'):
-                        from dataclasses import asdict
                         summary_data['stats'] = asdict(stats)
                     elif hasattr(stats, '__dict__'):
                         summary_data['stats'] = vars(stats)
@@ -733,6 +751,22 @@ class ResultsExporter:
     # Segment Export Methods
     # ========================================================================
 
+    def _background_file_export(self, time_str, event_list, window_start, window_end, video_source_str, segment_id_str):
+        """Runs the heavy file writing on a background thread so the camera doesn't freeze"""
+        try:
+            if 'json' in self.config.export_formats:
+                self._export_segment_json(time_str, event_list, window_start, window_end,
+                                          video_source=video_source_str, segment_id=segment_id_str)
+            if 'csv' in self.config.export_formats:
+                self._export_segment_csv(time_str, event_list, window_start, window_end,
+                                         video_source=video_source_str, segment_id=segment_id_str)
+            if 'excel' in self.config.export_formats:
+                self._export_segment_excel(time_str, event_list, window_start, window_end,
+                                           video_source=video_source_str, segment_id=segment_id_str)
+            self.logger.info(f"Background export finished for Segment {segment_id_str}")
+        except Exception as e:
+            self.logger.error(f"Background file export failed: {e}")
+
     def export_segment_results(self, segment_id: Union[int, str], counts: Dict, events: Dict, stats: Any,
                               video_source: str = None) -> Dict[str, str]:
         """
@@ -796,33 +830,39 @@ class ResultsExporter:
             self.logger.info(f"Segment {segment_id} event log exported to {len(exported_files)} format(s)")
 
             # ================================================================
-            # Cloud API Upload
+            # ASYNCHRONOUS LOCAL FILE EXPORTS
+            # ================================================================
+            # We fire this into the ThreadPool so Pandas doesn't freeze the camera!
+
+            safe_event_list = copy.deepcopy(event_list)
+
+            self.file_writer_pool.submit(
+                self._background_file_export,
+                time_str, safe_event_list, window_start, window_end, video_source_str, segment_id_str
+            )
+
+            exported_files = {"status": "Exporting in background"}
+
+            # ================================================================
+            # ASYNCHRONOUS CLOUD API UPLOAD
             # ================================================================
             if self.config.enable_api_upload:
-                self.logger.info("API Upload is CHECKED. Loading .env credentials...")
-
-                # Load the .env file
+                self.logger.info("API Upload is CHECKED. Starting background upload...")
                 load_dotenv()
-
-                # NOTE: Ensure these exactly match the text inside your .env file
                 api_url = os.getenv("API_URL")
                 api_key = os.getenv("API_KEY")
 
                 if api_url and api_key:
-                    self.logger.info(f"API Credentials found. Target: {api_url}")
-                    # Step 1: Format
-                    payload = self._prepare_api_payload(event_list)
+                    # We also throw the API Upload into the thread pool so the HTTPS POST
+                    # request doesn't freeze the camera while waiting for the server!
+                    def _api_task(payload):
+                        self._upload_to_api(api_url, api_key, payload)
 
-                    # Step 2: Upload
-                    if self._upload_to_api(api_url, api_key, payload):
-                        exported_files['cloud_status'] = "Success"
-                    else:
-                        self.logger.error("Failed to upload data to the API.")
+                    api_payload = self._prepare_api_payload(safe_event_list)
+                    self.file_writer_pool.submit(_api_task, api_payload)
+                    exported_files['cloud_status'] = "Uploading in background"
                 else:
-                    self.logger.error(
-                        "API Upload checked, but 'API_URL' or 'API_KEY' are missing/misspelled in the .env file!")
-            else:
-                self.logger.debug("API Upload is DISABLED in ExportConfig.")
+                    self.logger.error("API Upload checked, but 'API_URL' or 'API_KEY' missing in .env!")
 
             return exported_files
 
