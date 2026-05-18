@@ -305,12 +305,9 @@ class ObjectCounter:
             del self.object_states[track_id]
             self._last_speeds.pop(track_id, None)
 
-        # --- FIX: Synchronize Zone Reality ---
-        # Evaluate all zones and forcefully evict any ghosts or stale IDs
-        # so the UI and max concurrent tracking stay 100% accurate!
-        for zone_counter in self.zone_counters.values():
-            if zone_counter.config.enabled:
-                zone_counter.sync_occupancy(self.object_states, current_time)
+        # Synchronize zone reality in a single pass across all zones.
+        # O(zones + states) instead of O(zones * states).
+        ZoneCounter.sync_all_zones(self.zone_counters, self.object_states, current_time)
 
         return new_events
 

@@ -1,5 +1,7 @@
 import numpy as np
 import cv2
+import math
+import itertools
 from typing import Tuple, Dict, Optional
 from config_manager import CountingLine
 from collections import defaultdict
@@ -8,6 +10,12 @@ import datetime
 import time
 
 from core.tracking.schemas import ObjectState, CountingEvent
+
+# Process-wide monotonic counter for event_id uniqueness. time.time() alone
+# collides at ms resolution on Windows when several crossings fire in the
+# same frame; combining it with this counter guarantees uniqueness within
+# the process lifetime (and is human-readable next to the timestamp prefix).
+_event_seq = itertools.count()
 
 
 class LineCounter:
@@ -42,19 +50,32 @@ class LineCounter:
         return (int(norm_x * w), int(norm_y * h))
 
     def _calculate_line_properties(self):
-        """Calculate line properties for crossing detection"""
+        """Calculate line properties for crossing detection.
+
+        We keep scalar copies of the line vector and normal alongside the
+        numpy versions. The hot path (get_side, get_distance_to_point) reads
+        the scalars to avoid building numpy arrays per detection per line
+        per frame; the numpy versions are reserved for draw-time math."""
         x1, y1 = self.start_px
         x2, y2 = self.end_px
 
-        # Line vector
-        self.line_vector = np.array([x2 - x1, y2 - y1])
-        self.line_length = np.linalg.norm(self.line_vector)
+        # Scalar line vector for hot-path arithmetic
+        self.line_vec_x = x2 - x1
+        self.line_vec_y = y2 - y1
+        self.line_length = math.hypot(self.line_vec_x, self.line_vec_y)
 
-        # Normal vector (perpendicular to line)
+        # Scalar unit-normal (perpendicular to line, points to "left" side)
         if self.line_length > 0:
-            self.normal_vector = np.array([-self.line_vector[1], self.line_vector[0]]) / self.line_length
+            inv_len = 1.0 / self.line_length
+            self.normal_vec_x = -self.line_vec_y * inv_len
+            self.normal_vec_y = self.line_vec_x * inv_len
         else:
-            self.normal_vector = np.array([0, 1])
+            self.normal_vec_x = 0.0
+            self.normal_vec_y = 1.0
+
+        # Numpy aliases for code paths that still expect numpy (draw routines)
+        self.line_vector = np.array([self.line_vec_x, self.line_vec_y])
+        self.normal_vector = np.array([self.normal_vec_x, self.normal_vec_y])
 
     def _normalize_point(self, pt: Tuple[int, int]) -> Tuple[float, float]:
         x, y = pt
@@ -73,22 +94,20 @@ class LineCounter:
 
 
     def get_side(self, point: Tuple[int, int]) -> str:
-        """Determine which side of the line a point is on"""
+        """Determine which side of the line a point is on.
+
+        Inlined 2-D cross product on scalars. np.cross on 2-vectors was the
+        per-detection hot-path bottleneck and is deprecated in NumPy 2.x.
+        """
         x, y = point
         x1, y1 = self.start_px
-
-        # Vector from line start to point
-        point_vector = np.array([x - x1, y - y1])
-
-        # Calculate cross product to determine side
-        cross_product = np.cross(self.line_vector, point_vector)
-
-        if cross_product > 0:
+        # Cross product of (line_vec) x (point - start)
+        cross = self.line_vec_x * (y - y1) - self.line_vec_y * (x - x1)
+        if cross > 0:
             return "left"
-        elif cross_product < 0:
+        if cross < 0:
             return "right"
-        else:
-            return "on_line"
+        return "on_line"
 
     def get_vertical_side(self, point: Tuple[int, int]) -> str:
         """Determine if point is above or below the line"""
@@ -147,7 +166,7 @@ class LineCounter:
                 self.total_count += 1
 
                 event = CountingEvent(
-                    event_id=f"line_{self.config.name}_{object_state.track_id}_{time.time()}",
+                    event_id=f"line_{self.config.name}_{object_state.track_id}_{int(time.time()*1000)}_{next(_event_seq)}",
                     track_id=object_state.track_id,
                     class_id=object_state.class_id,
                     class_name=object_state.class_name,
@@ -265,7 +284,7 @@ class LineCounter:
                 self.total_count += 1
 
                 event = CountingEvent(
-                    event_id=f"line_{self.config.name}_{object_state.track_id}_{time.time()}",
+                    event_id=f"line_{self.config.name}_{object_state.track_id}_{int(time.time()*1000)}_{next(_event_seq)}",
                     track_id=object_state.track_id,
                     class_id=object_state.class_id,
                     class_name=object_state.class_name,
@@ -284,30 +303,22 @@ class LineCounter:
         return None
 
     def get_distance_to_point(self, point: Tuple[int, int]) -> float:
-        """Calculate perpendicular distance from point to line"""
+        """Calculate perpendicular distance from point to the line segment.
+        Pure Python arithmetic; runs per-detection per-line per-frame."""
         x0, y0 = point
         x1, y1 = self.start_px
         x2, y2 = self.end_px
 
-        # Line segment vector
         A = x2 - x1
         B = y2 - y1
-
-        # Vector from line start to point
         C = x0 - x1
         D = y0 - y1
 
-        # Calculate distance
-        dot = C * A + D * B
         len_sq = A * A + B * B
-
         if len_sq == 0:
-            # Line is actually a point
-            return np.sqrt(C * C + D * D)
+            return math.hypot(C, D)
 
-        param = dot / len_sq
-
-        # Find closest point on line segment
+        param = (C * A + D * B) / len_sq
         if param < 0:
             xx, yy = x1, y1
         elif param > 1:
@@ -316,10 +327,7 @@ class LineCounter:
             xx = x1 + param * A
             yy = y1 + param * B
 
-        # Calculate distance
-        dx = x0 - xx
-        dy = y0 - yy
-        return np.sqrt(dx * dx + dy * dy)
+        return math.hypot(x0 - xx, y0 - yy)
 
     def draw_line(self, frame: np.ndarray, show_count: bool = True) -> np.ndarray:
         """Draw the counting line on frame with optional count display"""

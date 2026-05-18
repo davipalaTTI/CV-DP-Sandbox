@@ -8,6 +8,7 @@ import datetime
 import time
 
 from core.tracking.schemas import ObjectState, CountingEvent, sanitize_dwell_time
+from core.tracking.line_math import _event_seq
 
 
 class ZoneCounter:
@@ -94,7 +95,7 @@ class ZoneCounter:
                 self.class_counts[object_state.class_id] += 1
 
                 event = CountingEvent(
-                    event_id=f"zone_{self.config.name}_{object_state.track_id}_{entry_timestamp}",
+                    event_id=f"zone_{self.config.name}_{object_state.track_id}_{int(entry_timestamp*1000)}_{next(_event_seq)}",
                     track_id=object_state.track_id,
                     class_id=object_state.class_id,
                     class_name=object_state.class_name,
@@ -121,31 +122,97 @@ class ZoneCounter:
         return None
 
     def sync_occupancy(self, object_states: Dict, current_time: float):
-        """Sync the zone's occupancy with the tracker's ground truth, filtering out ghosts."""
+        """Sync this zone's occupancy against the tracker's ground truth.
+
+        Prefer ZoneCounter.sync_all_zones for multi-zone setups — it scans
+        object_states once across every zone, saving O(zones * states) work.
+        """
         self.objects_in_zone.clear()
+        zone_name = self.config.name
 
         for track_id, state in object_states.items():
-            # Check if the object is currently marked as inside the zone
-            if state.zone_presence.get(self.config.name, False):
+            if not state.zone_presence.get(zone_name, False):
+                continue
 
-                # Filter out ghost tracks (ID switches) by ensuring the object
-                # was explicitly detected within the last 0.5 seconds
-                time_since_last_seen = current_time - state.last_seen
+            # Filter out ghost tracks (ID switches): the object must have been
+            # explicitly detected within the last 0.5 seconds.
+            if (current_time - state.last_seen) < 0.5:
+                self.objects_in_zone.add(track_id)
+                continue
 
-                if time_since_last_seen < 0.5:
-                    self.objects_in_zone.add(track_id)
-                else:
-                    # It's a ghost track. Forcefully evict it so it doesn't inflate counts!
-                    state.zone_presence[self.config.name] = False
-                    if self.config.name in state.zone_entry_times:
-                        del state.zone_entry_times[self.config.name]
+            # Ghost track. Treat eviction as the visit's end and accumulate
+            # whatever dwell was racked up before we lost sight of it, so we
+            # don't silently lose dwell that the natural exit branch would
+            # have recorded.
+            if zone_name in state.zone_entry_times:
+                entry_t = state.zone_entry_times[zone_name]
+                dwell = sanitize_dwell_time(state.last_seen - entry_t)
+                if dwell >= 0.5:
+                    state.zone_dwell_times[zone_name] = (
+                        state.zone_dwell_times.get(zone_name, 0.0) + dwell
+                    )
+                del state.zone_entry_times[zone_name]
+            state.zone_presence[zone_name] = False
 
         # Update peak tracking based on reality
         if self.config.track_max_concurrent:
             current_count = len(self.objects_in_zone)
             if current_count > self.max_concurrent:
                 self.max_concurrent = current_count
-                self.logger.debug(f"Zone {self.config.name} new peak: {self.max_concurrent}")
+                self.logger.debug(f"Zone {zone_name} new peak: {self.max_concurrent}")
+
+    @classmethod
+    def sync_all_zones(cls, zone_counters: Dict[str, "ZoneCounter"],
+                       object_states: Dict, current_time: float) -> None:
+        """Single-pass occupancy sync across every enabled zone.
+
+        Replaces N calls to sync_occupancy (each scanning all object_states):
+        O(zones * states)  ->  O(zones + states + presence_entries).
+        """
+        enabled = [zc for zc in zone_counters.values() if zc.config.enabled]
+        if not enabled:
+            return
+
+        for zc in enabled:
+            zc.objects_in_zone.clear()
+        enabled_by_name = {zc.config.name: zc for zc in enabled}
+
+        for track_id, state in object_states.items():
+            presence = state.zone_presence
+            if not presence:
+                continue
+            is_fresh = (current_time - state.last_seen) < 0.5
+
+            for zone_name, present in presence.items():
+                if not present:
+                    continue
+                zc = enabled_by_name.get(zone_name)
+                if zc is None:
+                    continue
+                if is_fresh:
+                    zc.objects_in_zone.add(track_id)
+                    continue
+                # Evict ghost. Treat eviction as the visit's end and accumulate
+                # any dwell that was racked up before we lost sight of the
+                # track — otherwise that visit's dwell is silently lost. Safe
+                # to mutate value here because dict iteration tolerates value
+                # writes on existing keys.
+                if zone_name in state.zone_entry_times:
+                    entry_t = state.zone_entry_times[zone_name]
+                    dwell = sanitize_dwell_time(state.last_seen - entry_t)
+                    if dwell >= 0.5:
+                        state.zone_dwell_times[zone_name] = (
+                            state.zone_dwell_times.get(zone_name, 0.0) + dwell
+                        )
+                    del state.zone_entry_times[zone_name]
+                presence[zone_name] = False
+
+        for zc in enabled:
+            if zc.config.track_max_concurrent:
+                current_count = len(zc.objects_in_zone)
+                if current_count > zc.max_concurrent:
+                    zc.max_concurrent = current_count
+                    zc.logger.debug(f"Zone {zc.config.name} new peak: {zc.max_concurrent}")
 
     def draw_zone(self, frame: np.ndarray, show_count: bool = True) -> np.ndarray:
         """Draw the counting zone on frame"""
