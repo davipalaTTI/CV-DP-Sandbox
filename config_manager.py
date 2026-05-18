@@ -110,6 +110,7 @@ class AppConfig:
 
     # Video output settings
     output_resolution: str = "720p"  # Options: "720p", "480p", "1080p", "original"
+    playback_speed_multiplier: float = 1.0  # Export FPS multiplier (1.0 = real-time, 4.0 = 4x speed)
 
     # Parallel processing settings
     max_parallel_videos: int = 1  # Number of videos to process simultaneously (1-4 recommended)

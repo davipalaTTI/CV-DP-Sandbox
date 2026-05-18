@@ -16,7 +16,6 @@ from typing import Dict
 from dataclasses import dataclass, field
 from collections import deque
 import logging
-import os
 
 
 @dataclass
@@ -82,7 +81,11 @@ class ProgressWindow:
         # FPS tracking - keep last 60 seconds of samples with timestamps
         self._fps_history = deque()  # (timestamp, fps) tuples
         self._fps_window_seconds = 60.0  # Average over last minute
-        
+
+        # UI throttle: cap visible refreshes at ~10 Hz even when model updates faster
+        self._last_ui_tick = 0.0
+        self._ui_min_interval = 0.1
+
         # Build UI
         self._build_ui()
 
@@ -94,6 +97,8 @@ class ProgressWindow:
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.is_closed = False
+        # Signaled when the user closes the window; BatchRunner polls this to break its loop.
+        self.close_event = threading.Event()
         
     def _build_ui(self):
         """Build the UI components"""
@@ -173,8 +178,8 @@ class ProgressWindow:
                 start_time=time.time()
             )
             self._create_video_widget(worker_id, video_name)
-        self._update_display()
-    
+        self._update_display(force=True)
+
     def _create_video_widget(self, worker_id: int, video_name: str):
         """Create UI widgets for a video"""
         if self.is_closed:
@@ -245,19 +250,24 @@ class ProgressWindow:
                 
                 # Remove from active tracking
                 del self.active_videos[worker_id]
-        
-        self._update_display()
+
+        self._update_display(force=True)
     
     def set_total_queued(self, count: int):
         """Set the total number of queued videos"""
         self.total_queued = count
         self._update_display()
     
-    def _update_display(self):
-        """Update all display elements"""
+    def _update_display(self, force: bool = False):
+        """Update all display elements. Throttled to ~10 Hz unless force=True."""
         if self.is_closed:
             return
-            
+
+        now = time.time()
+        if not force and (now - self._last_ui_tick) < self._ui_min_interval:
+            return
+        self._last_ui_tick = now
+
         try:
             with self.lock:
                 active_count = len(self.active_videos)
@@ -327,12 +337,16 @@ class ProgressWindow:
                 # Total events
                 total_events = sum(v.events_count for v in self.active_videos.values())
                 self.stats_labels['total_events'].config(text=str(total_events))
-            
-            self.root.update()
-            
+
+            # update_idletasks redraws widgets without pumping the event loop
+            # (avoiding the reentrancy of root.update()). The event loop itself
+            # is pumped by keep_responsive() from the caller's main loop.
+            self.root.update_idletasks()
+
         except tk.TclError:
             # Window was closed
             self.is_closed = True
+            self.close_event.set()
     
     def _format_time(self, seconds: float) -> str:
         """Format seconds into human readable time"""
@@ -395,22 +409,25 @@ class ProgressWindow:
                         if "FPS:" in part:
                             try:
                                 fps = float(part.split(":")[1].strip())
-                                self._fps_history.append(fps)
-                            except:
+                                # Match the (timestamp, fps) tuple format used by the main path
+                                self._fps_history.append((time.time(), fps))
+                            except (ValueError, IndexError):
                                 pass
-            except:
+            except (AttributeError, TypeError):
                 pass
 
     def on_close(self, event=None):
-        """Handle window close"""
+        """Handle window close. Signals the caller's main loop to wind down
+        cleanly so finally-blocks (master log flush, video writer release,
+        exporter shutdown) actually run."""
+        if self.is_closed:
+            return
         self.is_closed = True
-        print("\n[EXIT] Closing down... please wait a moment.")
-
-        time.sleep(0.5)
-
-        os._exit(0)
-        # self.root.destroy()
-
+        self.close_event.set()
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
     def close(self):
         """Close the progress window"""

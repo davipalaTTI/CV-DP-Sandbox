@@ -2,8 +2,9 @@ import os
 import cv2
 import time
 import logging
+import threading
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from collections import deque
 import numpy as np
@@ -21,13 +22,15 @@ from ..visualizer_heatmap import HeatmapAccumulator
 
 class VideoWorker:
     """
-    Isolated worker for processing a single video.
-    Each worker has its own detection engine, counter, and exporter instance
-    to avoid shared state issues during concurrent processing.
+    Worker for processing a single video. Shares the orchestrator's
+    DetectionEngine (thread-safe via internal lock); owns its own counter
+    and exporter so per-video state stays isolated.
     """
 
     def __init__(self, config: 'AppConfig', video_path: Path, worker_id: int,
-                 queue_size_callback=None):
+                 detection_engine: DetectionEngine,
+                 queue_size_callback=None,
+                 stop_event: Optional[threading.Event] = None):
         self.config = config
         self.video_path = video_path
         self.worker_id = worker_id
@@ -36,13 +39,13 @@ class VideoWorker:
         # Callback to get video queue size (for extended stability wait when queue <= 1)
         self.queue_size_callback = queue_size_callback
 
-        # Each worker gets its own detection engine
-        self.detection_engine = DetectionEngine(
-            config.model_path,
-            config.confidence_threshold,
-            allowed_classes=(config.allowed_classes or None),
-            device=config.device
-        )
+        # Cooperative cancellation flag set by the orchestrator on shutdown.
+        # Polled inside the main frame loop and during growing-file waits.
+        self.stop_event = stop_event
+
+        # Shared detection engine owned by the orchestrator. Reused across all
+        # videos to avoid leaking TensorRT contexts on each worker construction.
+        self.detection_engine = detection_engine
 
         # Each worker gets its own counter
         frame_size = (config.display_width, config.display_height)
@@ -101,6 +104,14 @@ class VideoWorker:
 
         # Heatmap (optional)
         self.heatmap_acc = None
+
+    def _sleep_or_stop(self, seconds: float) -> bool:
+        """Sleep up to `seconds`, returning True early if a stop was requested.
+        Lets cancellation interrupt the long waits used by growing-file polling."""
+        if self.stop_event is None:
+            time.sleep(seconds)
+            return False
+        return self.stop_event.wait(timeout=seconds)
 
     def process(self, progress_callback=None) -> Dict:
         """
@@ -240,6 +251,10 @@ class VideoWorker:
 
             # Process frames
             while True:
+                if self.stop_event is not None and self.stop_event.is_set():
+                    self.logger.info(f"Worker {self.worker_id}: stop requested, exiting frame loop")
+                    break
+
                 frame_start = time.time()
 
                 ret, frame = self.cap.read()
@@ -266,7 +281,8 @@ class VideoWorker:
                             wait_time = min(2.0 + (consecutive_read_failures * 1.0), 5.0)
                             self.logger.debug \
                                 (f"Worker {self.worker_id}: Waiting {wait_time:.1f}s for more data to be written...")
-                            time.sleep(wait_time)
+                            if self._sleep_or_stop(wait_time):
+                                break
 
                             # Reopen video at current position to read new frames
                             current_pos = self.video_frame_number
@@ -291,7 +307,8 @@ class VideoWorker:
                                     self.logger.debug \
                                         (f"Worker {self.worker_id}: Caught up to live edge, waiting for buffer ({current_pos}/{safe_max_frame})...")
                                     self.cap.release()
-                                    time.sleep(2.0)
+                                    if self._sleep_or_stop(2.0):
+                                        break
                                     # Reopen for next iteration
                                     self.cap = cv2.VideoCapture(str(self.video_path))
                                     if self.cap.isOpened():
@@ -340,7 +357,8 @@ class VideoWorker:
                                         remaining_wait  # Seconds until stability timeout
                                     )
 
-                                time.sleep(wait_time)
+                                if self._sleep_or_stop(wait_time):
+                                    break
                                 waiting_until_recheck = 0.0  # Reset after sleep
 
                                 # Reopen to check for new frames
@@ -360,7 +378,8 @@ class VideoWorker:
                                     if safe_max_frame <= current_pos:
                                         # Still too close to live edge, wait more
                                         self.cap.release()
-                                        time.sleep(1.0)
+                                        if self._sleep_or_stop(1.0):
+                                            break
                                         self.cap = cv2.VideoCapture(str(self.video_path))
                                         if self.cap.isOpened():
                                             self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
@@ -409,14 +428,16 @@ class VideoWorker:
                 # Trigger live export to master_log (checks interval internally)
                 self._trigger_live_export(force=False)
 
-            # Check for 0-frame edge case - file may not have been ready
-            if self.stats.frames_processed == 0 and wait_for_growing:
+            # Check for 0-frame edge case - file may not have been ready.
+            # Skip this retry path if a stop was requested.
+            stopped = self.stop_event is not None and self.stop_event.is_set()
+            if self.stats.frames_processed == 0 and wait_for_growing and not stopped:
                 try:
                     file_size = self.video_path.stat().st_size
                     if file_size > 1024:  # File has content (> 1KB)
                         self.logger.warning \
                             (f"Worker {self.worker_id}: Processed 0 frames from {file_size} byte file - retrying after delay...")
-                        time.sleep(5.0)  # Wait for more data
+                        self._sleep_or_stop(5.0)  # interruptible; falls through to finalize regardless
 
                         # Retry by reopening
                         self._cleanup()
@@ -496,11 +517,14 @@ class VideoWorker:
         try:
             width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            # --- FIX 1: The FPS Fallback & Speed Multiplier ---
             base_fps = self.video_fps if self.video_fps > 0 else 30.0
 
-            # --- NEW: Speed up the playback! (2.0 = 2x speed) ---
-            playback_speed = 4.0
+            # Playback speed multiplier from config (default 1.0 = real-time).
+            # Values >1.0 produce sped-up output for review; timestamp overlays will
+            # advance at real-time but the video plays faster, so they desync.
+            playback_speed = float(getattr(self.config, "playback_speed_multiplier", 1.0) or 1.0)
+            if playback_speed <= 0:
+                playback_speed = 1.0
             export_fps = base_fps * playback_speed
 
             output_path = Path(self.config.output_folder) / f"{self.video_path.stem}_output.mp4"

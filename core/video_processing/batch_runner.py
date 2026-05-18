@@ -5,7 +5,7 @@ import threading
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional
-from queue import Queue as ThreadQueue
+from queue import Queue as ThreadQueue, Empty
 from concurrent.futures import ThreadPoolExecutor
 
 from config_manager import AppConfig
@@ -33,9 +33,21 @@ class BatchRunner:
         self.progress_lock = threading.Lock()
         self.worker_progress = {}
 
-        # Signal handlers for graceful shutdown
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        # Cooperative cancellation: set on SIGINT/SIGTERM or window close.
+        # Workers poll this each iteration and exit cleanly so finally-blocks run.
+        self._stop_event = threading.Event()
+
+        # signal.signal can only be called from the main thread. Guard so that
+        # constructing a BatchRunner off-thread (tests, future GUI integration)
+        # doesn't raise ValueError on Windows.
+        if threading.current_thread() is threading.main_thread():
+            try:
+                signal.signal(signal.SIGINT, self._signal_handler)
+                signal.signal(signal.SIGTERM, self._signal_handler)
+            except (ValueError, OSError) as e:
+                self.logger.debug(f"Could not register signal handlers: {e}")
+        else:
+            self.logger.debug("BatchRunner constructed off main thread; skipping signal registration")
 
     def _combine_video_stats(self, video_results: List[Dict]) -> Dict:
         """Combine statistics from multiple videos"""
@@ -49,7 +61,7 @@ class BatchRunner:
 
     def _signal_handler(self, signum, frame):
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
-        # (ThreadPool will catch the shutdown event during execution)
+        self._stop_event.set()
 
     def run(self, max_workers: int = None) -> Dict:
         """Process video files from folder with concurrent workers."""
@@ -115,11 +127,16 @@ class BatchRunner:
         try:
             active_workers = 0
             while True:
+                if self._stop_event.is_set() or progress.close_event.is_set():
+                    self._stop_event.set()
+                    self.logger.info("Stop requested; winding down active workers...")
+                    break
+
                 # Submit new jobs
                 while active_workers < max_workers and not video_queue.empty():
                     try:
                         video_path = video_queue.get_nowait()
-                    except:
+                    except Empty:
                         break
 
                     if not video_path.exists():
@@ -129,7 +146,14 @@ class BatchRunner:
                     video_count += 1
                     worker_id_counter += 1
 
-                    worker = VideoWorker(self.config, video_path, worker_id_counter, queue_size_callback=get_queue_size)
+                    worker = VideoWorker(
+                        self.config,
+                        video_path,
+                        worker_id_counter,
+                        detection_engine=self.detection_engine,
+                        queue_size_callback=get_queue_size,
+                        stop_event=self._stop_event,
+                    )
 
                     # Quick check to register UI correctly
                     import cv2
@@ -183,14 +207,13 @@ class BatchRunner:
                     if self.config.input_type.value == "folder":
                         progress.set_status("Waiting for new files... (Ctrl+C to stop)")
                         while video_queue.empty():
+                            if self._stop_event.is_set() or progress.close_event.is_set():
+                                self._stop_event.set()
+                                break
                             time.sleep(0.1)
                             progress.keep_responsive()
-                            if progress.is_closed:
-                                return {
-                                    "total_videos": len(total_results),
-                                    "video_results": total_results,
-                                    "combined_stats": self._combine_video_stats(total_results)
-                                }
+                        if self._stop_event.is_set():
+                            break
                     else:
                         break
 
@@ -199,11 +222,18 @@ class BatchRunner:
 
         except KeyboardInterrupt:
             self.logger.info("Processing interrupted by user")
-            executor.shutdown(wait=False, cancel_futures=True)
+            self._stop_event.set()
 
         finally:
+            # Make sure workers exit even if we got here without setting the flag
+            self._stop_event.set()
+
             if folder_monitor:
                 folder_monitor.stop()
+
+            # Don't pass cancel_futures=True: running workers must reach their
+            # finally-blocks (cap.release, video_writer.release, segment flush).
+            # The stop_event makes them exit promptly on their own.
             executor.shutdown(wait=True)
             progress.close()
 
