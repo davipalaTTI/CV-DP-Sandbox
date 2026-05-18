@@ -63,7 +63,8 @@ This application provides real-time object counting across multiple counting lin
 ```
 opencv-python>=4.8.0
 ultralytics>=8.0.0
-numpy>=1.24.0
+numpy>=1.23.0,<2.0.0
+torch>=2.0.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 psutil>=5.9.0
@@ -71,11 +72,16 @@ pyyaml>=6.0
 matplotlib>=3.7.0
 seaborn>=0.12.0
 pillow>=9.0.0
+requests>=2.31.0          # cloud API upload (always imported)
+python-dotenv>=1.0.0      # loads API_URL / API_KEY from .env
 ```
 
 **Optional dependencies:**
 ```
-psycopg2-binary>=2.9.0  # For PostgreSQL cloud upload
+onnxruntime>=1.16.0       # required to run .onnx models
+onnx>=1.14.0              # fallback for ONNX input-shape probing
+memory-profiler>=0.61.0   # enables the --memory-profile CLI flag
+# TensorRT must be installed manually from NVIDIA (no pip package).
 ```
 
 ---
@@ -106,8 +112,11 @@ source venv/bin/activate
 ```bash
 pip install -r requirements.txt
 
-# Optional: For cloud database support
-pip install psycopg2-binary
+# Optional: ONNX model support
+pip install onnxruntime onnx
+
+# Optional: --memory-profile CLI flag
+pip install memory-profiler
 ```
 
 ### 4. Download YOLO Model
@@ -224,6 +233,7 @@ When you run `python main.py`, the configuration dialog appears:
 | **Process every N frame(s)** | Frame skip for speed (1-5) | 1 |
 | **Interpolate tracks** | Smooth tracking between skips | On |
 | **Parallel videos** | Simultaneous video processing (1-4) | 1 |
+| **Playback speed multiplier** | Saved-video export FPS multiplier (config-only field `playback_speed_multiplier`). `1.0` = real-time; `>1.0` produces sped-up review video and desyncs the timestamp overlay | 1.0 |
 
 ### Training Mode Section (Optional)
 
@@ -236,15 +246,21 @@ When you run `python main.py`, the configuration dialog appears:
 | **Include empty frames** | Save frames with no detections | Off |
 | **Apply augmentation** | Flip/brightness variations | Off |
 
-### Cloud Database Upload Section (Optional)
+### Cloud API Upload Section (Optional)
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| **DB Config File** | Path to database config file (.conf) | (blank) |
-| **DB Section Name** | Section name in config file | (blank) |
-| **Table Name** | PostgreSQL table for uploads | (blank) |
+| **Enable API Upload** | Toggle cloud upload via HTTPS POST to the configured FastAPI bridge (`enable_api_upload`) | Off |
 
-> **Note:** Leave all cloud fields blank to skip cloud upload (local-only mode).
+The API URL and key are **not** entered in the GUI — they're read from a
+`.env` file in the working directory at upload time:
+
+```env
+API_URL=https://your-bridge.example.com/events
+API_KEY=your-api-key
+```
+
+> **Note:** Leave **Enable API Upload** unchecked to run local-only.
 
 ### Load Config Button
 
@@ -433,45 +449,47 @@ output_folder/
 
 ---
 
-## ☁️ Cloud Database Upload (Optional)
+## ☁️ Cloud API Upload (Optional)
 
-The application can optionally upload events to a PostgreSQL database after each segment export.
+When **Enable API Upload** is checked, each hourly segment is also POSTed
+to a remote FastAPI bridge over HTTPS as soon as the local segment
+export finishes. The upload runs on the exporter's background thread
+pool, so the camera/processing loop is never blocked waiting for the
+network.
 
 ### Setup
 
-1. **Install psycopg2:**
-   ```bash
-   pip install psycopg2-binary
+1. **Dependencies** — `requests` and `python-dotenv` are listed in
+   `requirements.txt` and installed automatically.
+
+2. **Create a `.env` file** in the working directory:
+   ```env
+   API_URL=https://your-bridge.example.com/events
+   API_KEY=your-api-key
    ```
 
-2. **Create a database config file** (e.g., `config/dbconfig.conf`):
-   ```ini
-   [cv-database]
-   host=your-database-host.com
-   port=5432
-   database=your_database_name
-   user=your_username
-   password=your_password
-   ```
-
-3. **Configure in the GUI:**
-   - **DB Config File**: Browse to your `dbconfig.conf`
-   - **DB Section Name**: `cv-database` (or your section name)
-   - **Table Name**: Your target table name
+3. **Enable in the GUI** — check the **Enable API Upload** option (or
+   set `"enable_api_upload": true` in `config.json`).
 
 ### Cloud Upload Behavior
 
-- Events are exported locally first, then uploaded to the cloud
-- If upload fails, local export is preserved (no data loss)
-- If `psycopg2` is not installed, cloud upload is silently skipped
-- Leave all cloud fields blank to use local-only mode
+- Events are written to local files first, then uploaded — local export
+  is preserved even if the upload fails.
+- The POST sends JSON with an `X-API-Key` header and a 15 s timeout.
+- If `API_URL` or `API_KEY` is missing from `.env`, the upload is
+  skipped and the failure is logged.
+- The upload is fire-and-forget: failures are logged but do not stop
+  processing.
 
 ### Cloud Data Transformation
 
-When uploading to the cloud, the data is transformed:
-- Columns dropped: `class_id`, `speed_units`, `segment_id`, `confidence`
-- Columns renamed: `actual_datetime` → `time`, `speed` → `speed_mph`
-- Values rounded: `speed_mph`, `track_id`, `dwell_seconds` (ceiling)
+Before upload, events are normalized to the bridge's schema:
+- Columns dropped: `event_id`, `class_id`, `speed_units`, `segment_id`,
+  `confidence`, `timestamp`, `position`.
+- Columns renamed: `actual_datetime` → `time`, `speed` → `speed_mph`.
+- Values rounded: `speed_mph` and `track_id` (nearest), `dwell_seconds`
+  (ceiling).
+- `NaN` / `±inf` values are converted to `None`.
 
 ---
 
@@ -492,17 +510,18 @@ The configuration file is automatically saved and contains all settings:
   "is_camera": false,
   "enable_zones": true,
   "save_video": true,
+  "playback_speed_multiplier": 1.0,
   "frame_skip": 2,
   "interpolate_tracks": true,
   "max_parallel_videos": 2,
-  
+
   "enable_speed": true,
   "speed_units": "mph",
   "meters_per_pixel": 0.064,
-  
+
   "enable_heatmap": true,
   "heatmap_interval_sec": 600,
-  
+
   "lines_config": [
     {
       "name": "Entry Line",
@@ -514,15 +533,16 @@ The configuration file is automatically saved and contains all settings:
       "poi_mode": "bottom"
     }
   ],
-  
+
   "zones_config": [...],
   "exclusion_zones": [...],
-  
-  "cloud_db_name": "cv-database",
-  "cloud_table_name": "events",
-  "cloud_db_config_path": "config/dbconfig.conf"
+
+  "enable_api_upload": false
 }
 ```
+
+> Cloud upload credentials (`API_URL`, `API_KEY`) live in a `.env` file
+> alongside `config.json`, not in `config.json` itself.
 
 ### Calibrating Real-World Speed
 
@@ -590,10 +610,15 @@ When processing folders with files being actively recorded:
 
 ### Cloud Upload Failing
 
-- Verify `psycopg2` is installed: `pip install psycopg2-binary`
-- Check database config file path and format
-- Verify database credentials and connectivity
-- Check logs for specific error messages
+- Verify `.env` exists in the working directory and defines both
+  `API_URL` and `API_KEY` (missing values are logged but do not raise).
+- Confirm the bridge URL is reachable from this machine (the POST has a
+  15 s timeout).
+- Check the API key — a non-200 response is logged with the bridge's
+  body for diagnosis.
+- Verify the local segment files exist in `output_folder/segments/`;
+  the local export always runs first, so its presence rules out a
+  config problem upstream of the upload step.
 
 ### Headless Mode Not Working
 
@@ -648,5 +673,5 @@ For issues and questions:
 
 **Version:** 1.0.1  
 **Author:** TH  
-**Last Updated:** February 2026
+**Last Updated:** May 2026
 
