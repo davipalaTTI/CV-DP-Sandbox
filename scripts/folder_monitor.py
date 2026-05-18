@@ -17,8 +17,11 @@ class FolderMonitor:
     Uses polling instead of watchdog for simplicity and fewer dependencies.
     """
 
-    # Supported video extensions
-    VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv', '.MP4', '.AVI', '.MOV', '.MKV'}
+    # Supported video extensions (compared case-insensitively).
+    # On case-insensitive filesystems (e.g. Windows NTFS) globbing each
+    # cased variant separately returns the same file twice, which bloated
+    # known_files and triggered duplicate "new video" callbacks.
+    VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv'}
 
     def __init__(self,
                  folder_path: str,
@@ -50,48 +53,61 @@ class FolderMonitor:
         self.logger.info(f"Folder monitor initialized for: {self.folder_path}")
         self.logger.info(f"Found {len(self.known_files)} existing video files")
 
+    def _list_video_files(self):
+        """Return (file_path, mtime) pairs for every video file in the folder.
+
+        Single glob pass + case-insensitive suffix filter. Each file is stat'd
+        exactly once and the result is reused by callers that need mtime.
+        """
+        results = []
+        try:
+            for p in self.folder_path.iterdir():
+                if p.suffix.lower() not in self.VIDEO_EXTENSIONS:
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue  # file removed mid-scan
+                if not p.is_file():
+                    continue
+                results.append((p, st.st_mtime))
+        except (OSError, FileNotFoundError) as e:
+            self.logger.debug(f"Folder scan failed: {e}")
+        return results
+
     def _scan_existing_files(self):
         """Scan folder and record existing video files"""
         if not self.folder_path.exists():
             self.logger.warning(f"Folder does not exist: {self.folder_path}")
             return
 
-        for ext in self.VIDEO_EXTENSIONS:
-            for video_file in self.folder_path.glob(f"*{ext}"):
-                if video_file.is_file():
-                    self.known_files.add(video_file)
+        for video_file, _mtime in self._list_video_files():
+            self.known_files.add(video_file)
 
         self.logger.debug(f"Scanned existing files: {len(self.known_files)} videos found")
 
     def _check_for_new_files(self):
         """Check folder for new video files"""
         try:
-            current_files = set()
+            entries = self._list_video_files()
+            current_paths = {p for p, _ in entries}
+            new_paths = current_paths - self.known_files
+            if not new_paths:
+                return
 
-            # Scan all video extensions
-            for ext in self.VIDEO_EXTENSIONS:
-                for video_file in self.folder_path.glob(f"*{ext}"):
-                    if video_file.is_file():
-                        current_files.add(video_file)
+            # Sort new files by mtime (oldest first) without re-stat'ing
+            new_entries = sorted(
+                ((p, m) for p, m in entries if p in new_paths),
+                key=lambda pm: pm[1],
+            )
 
-            # Find new files
-            new_files = current_files - self.known_files
-
-            if new_files:
-                # Sort by modification time (oldest first)
-                new_files_sorted = sorted(new_files, key=lambda p: p.stat().st_mtime)
-
-                for new_file in new_files_sorted:
-                    self.logger.info(f"New video detected: {new_file.name}")
-
-                    # Add to known files
-                    self.known_files.add(new_file)
-
-                    # Notify callback
-                    try:
-                        self.callback(new_file)
-                    except Exception as e:
-                        self.logger.error(f"Callback error for {new_file.name}: {e}")
+            for new_file, _mtime in new_entries:
+                self.logger.info(f"New video detected: {new_file.name}")
+                self.known_files.add(new_file)
+                try:
+                    self.callback(new_file)
+                except Exception as e:
+                    self.logger.error(f"Callback error for {new_file.name}: {e}")
 
         except Exception as e:
             self.logger.error(f"Error checking for new files: {e}")
@@ -137,8 +153,17 @@ class FolderMonitor:
         self.logger.info("Folder monitor stopped")
 
     def get_known_files(self) -> List[Path]:
-        """Get list of all known video files"""
-        return sorted(list(self.known_files), key=lambda p: p.stat().st_mtime)
+        """Get list of all known video files (sorted oldest first)."""
+        entries = []
+        for p in self.known_files:
+            try:
+                entries.append((p, p.stat().st_mtime))
+            except OSError:
+                # File vanished between scans; surface it at the end so callers
+                # that try to open it get a clean "does not exist" failure.
+                entries.append((p, float('inf')))
+        entries.sort(key=lambda pm: pm[1])
+        return [p for p, _ in entries]
 
     @staticmethod
     def is_file_growing(file_path: Path, check_interval: float = 2.0) -> bool:

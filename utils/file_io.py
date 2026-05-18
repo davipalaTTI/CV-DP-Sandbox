@@ -21,9 +21,9 @@ def safe_read_json(filepath: Union[str, Path]) -> Optional[Dict]:
         Parsed JSON data or None if failed
     """
     try:
-        with open(filepath, 'r') as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, PermissionError) as e:
+    except (FileNotFoundError, json.JSONDecodeError, PermissionError, UnicodeDecodeError) as e:
         logging.getLogger(__name__).error(f"Failed to read JSON file {filepath}: {e}")
         return None
 
@@ -41,9 +41,14 @@ def safe_write_json(data: Dict, filepath: Union[str, Path], indent: int = 2) -> 
         True if successful, False otherwise
     """
     try:
-        Path(filepath).parent.mkdir(parents=True, exist_ok=True)
-        with open(filepath, 'w') as f:
+        path = Path(filepath)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write: dump to a sibling temp file, then os.replace. A crash
+        # mid-write leaves the original file intact instead of truncated.
+        tmp = path.with_suffix(path.suffix + '.tmp')
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=indent, default=str)
+        os.replace(tmp, path)
         return True
     except (PermissionError, OSError) as e:
         logging.getLogger(__name__).error(f"Failed to write JSON file {filepath}: {e}")
@@ -61,9 +66,9 @@ def safe_read_yaml(filepath: Union[str, Path]) -> Optional[Dict]:
         Parsed YAML data or None if failed
     """
     try:
-        with open(filepath, 'r') as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
-    except (FileNotFoundError, yaml.YAMLError, PermissionError) as e:
+    except (FileNotFoundError, yaml.YAMLError, PermissionError, UnicodeDecodeError) as e:
         logging.getLogger(__name__).error(f"Failed to read YAML file {filepath}: {e}")
         return None
 

@@ -61,16 +61,28 @@ def get_available_axis_cameras() -> Dict[str, str]:
     # 1. Silent Ping Sweep on ALL found subnets
     for subnet in subnets:
         try:
-            subprocess.run(['nmap', '-sn', subnet], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # nmap on a /24 can hang for minutes if a host blackholes packets;
+            # cap each subnet sweep at 15s so camera discovery never blocks startup.
+            subprocess.run(
+                ['nmap', '-sn', subnet],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                check=False,
+            )
         except FileNotFoundError:
             logger.warning("nmap is not installed. Camera discovery may fail.")
             break  # Stop trying if nmap doesn't exist
+        except subprocess.TimeoutExpired:
+            logger.warning(f"nmap sweep timed out on {subnet} (continuing).")
         except Exception as e:
             logger.debug(f"Network sweep encountered an issue on {subnet}: {e}")
 
     # 2. Read Global ARP Table (contains results from all interfaces)
     try:
-        arp_output = subprocess.check_output(['arp', '-a'], universal_newlines=True)
+        arp_output = subprocess.check_output(
+            ['arp', '-a'], universal_newlines=True, timeout=5
+        )
         for line in arp_output.splitlines():
             mac_match = re.search(r'(?:[0-9a-fA-F]{1,2}[:-]){5}[0-9a-fA-F]{1,2}', line)
             ip_match = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', line)

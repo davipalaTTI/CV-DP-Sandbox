@@ -351,12 +351,21 @@ class CameraRunner:
         return now_dt >= self.next_split_dt
 
     def _compute_next_clock_boundary(self, base_dt: datetime, interval_min: int) -> datetime:
-        next_hour = base_dt.replace(minute=0, second=0, microsecond=0)
-        if base_dt.minute > 0 or base_dt.second > 0 or base_dt.microsecond > 0:
-            next_hour += timedelta(hours=1)
-        else:
-            next_hour += timedelta(hours=1)
-        return next_hour
+        """Round base_dt up to the next clock-aligned boundary `interval_min` minutes
+        past the top of the hour. With interval_min=60 at 12:07:30 returns 13:00:00;
+        with interval_min=15 at 12:07:30 returns 12:15:00. If base_dt is already exactly
+        on a boundary, returns the NEXT boundary (callers compare with >=)."""
+        if interval_min <= 0:
+            interval_min = 60
+
+        hour_start = base_dt.replace(minute=0, second=0, microsecond=0)
+        minutes_into_hour = (
+            base_dt.minute
+            + base_dt.second / 60.0
+            + base_dt.microsecond / 60_000_000.0
+        )
+        intervals_elapsed = int(minutes_into_hour // interval_min)
+        return hour_start + timedelta(minutes=(intervals_elapsed + 1) * interval_min)
 
     def _rollover_segment(self) -> None:
         current_time = datetime.now()

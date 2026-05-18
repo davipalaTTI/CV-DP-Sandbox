@@ -303,6 +303,7 @@ class ObjectCounter:
                         del obj_state.zone_entry_times[zone_name]
 
             del self.object_states[track_id]
+            self._last_speeds.pop(track_id, None)
 
         # --- FIX: Synchronize Zone Reality ---
         # Evaluate all zones and forcefully evict any ghosts or stale IDs
@@ -335,6 +336,7 @@ class ObjectCounter:
 
         for track_id in stale_ids:
             del self.object_states[track_id]
+            self._last_speeds.pop(track_id, None)
 
         if stale_ids:
             self.logger.debug(f"Cleaned up {len(stale_ids)} stale object states")
@@ -390,6 +392,8 @@ class ObjectCounter:
 
         self.counting_events.clear()
         self.object_states.clear()
+        self._last_speeds.clear()
+        self.zone_entry_events.clear()
 
         self.logger.info("All counters reset")
 

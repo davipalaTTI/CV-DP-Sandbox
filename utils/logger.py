@@ -2,10 +2,33 @@ import logging
 import logging.handlers
 import sys
 import os
+import queue
 from pathlib import Path
 from typing import Optional
 
 _log_queue_listener = None
+
+
+class _DropOldestQueueHandler(logging.handlers.QueueHandler):
+    """QueueHandler that drops the OLDEST record when the bounded queue is full.
+
+    Logging's default QueueHandler raises queue.Full once the queue is saturated,
+    which silently drops the new record. Recent records carry the most diagnostic
+    value, so we drop the oldest instead and always accept the newest.
+    """
+
+    def enqueue(self, record):
+        try:
+            self.queue.put_nowait(record)
+        except queue.Full:
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self.queue.put_nowait(record)
+            except queue.Full:
+                pass  # give up; another producer beat us to the slot
 
 
 class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
@@ -160,11 +183,13 @@ def setup_logging(level: int = logging.INFO,
 
     # Use queue-based logging for thread safety
     if handlers:
-        from queue import Queue
-        log_queue = Queue(-1)  # Unlimited queue size
+        # Bounded queue: if a downstream handler stalls (e.g. log file locked
+        # on OneDrive), memory growth is capped. _DropOldestQueueHandler drops
+        # the oldest record on overflow so recent diagnostics survive.
+        log_queue = queue.Queue(maxsize=10000)
 
         # QueueHandler for the root logger (all threads put logs here)
-        queue_handler = logging.handlers.QueueHandler(log_queue)
+        queue_handler = _DropOldestQueueHandler(log_queue)
         queue_handler.setLevel(level)
         root_logger.addHandler(queue_handler)
 
