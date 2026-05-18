@@ -1,11 +1,22 @@
 import tensorrt
 import cv2
 import numpy as np
+
+# Silence onnxruntime's native C++ logger BEFORE Ultralytics creates a session.
+# On Windows this also avoids the unreadable UTF-16 ANSI spam in the console.
+# Severity levels: 0=verbose, 1=info, 2=warning, 3=error, 4=fatal.
+try:
+    import onnxruntime as _ort
+    _ort.set_default_logger_severity(3)
+except Exception:
+    pass
+
 from ultralytics import YOLO
 from typing import Dict, List, Optional, Tuple, Set
 from dataclasses import dataclass
 from pathlib import Path
 import logging
+import threading
 import torch
 
 
@@ -51,8 +62,78 @@ class DetectionEngine:
         # Setup logging
         self.logger = logging.getLogger(__name__)
 
+        # Rate-limit duplicate "Detection failed" log lines so cold-start
+        # cuDNN/CUDA transients don't flood the console.
+        self._error_counts: Dict[str, int] = {}
+        self._error_log_threshold = 3  # log first N occurrences, then summarize every 500
+
+        # Serializes GPU inference and engine-state mutations across worker threads.
+        # Why: Ultralytics + TensorRT uses CUDA Graph capture; concurrent calls from
+        # multiple threads share the default stream and trigger
+        # "operation not permitted when stream is capturing".
+        self._lock = threading.Lock()
+
         # Initialize model
         self._load_model()
+
+    def _log_detection_error(self, exc: Exception) -> None:
+        """Rate-limited error logger that collapses repeated identical failures."""
+        # Use only the first line of the message as the key — full message can
+        # include long stack traces that vary slightly each call.
+        key = str(exc).splitlines()[0][:200]
+        count = self._error_counts.get(key, 0) + 1
+        self._error_counts[key] = count
+        if count <= self._error_log_threshold:
+            self.logger.error(f"Detection failed: {exc}")
+        elif count % 500 == 0:
+            self.logger.warning(f"Detection failed (repeated {count}x): {key}")
+
+    def _detect_model_imgsz(self, default: int = 640) -> int:
+        """
+        Read the model's expected input size from disk.
+
+        ONNX models exported with a fixed input shape (e.g. 1152x1152) must be
+        called with that exact size or onnxruntime rejects the call. We probe
+        the file once at load time and reuse the value for every inference.
+        Dynamic-shape models fall back to `default`.
+        """
+        suffix = Path(self.model_path).suffix.lower()
+        if suffix != ".onnx":
+            return default
+
+        # Primary path: onnxruntime is always installed when running ONNX models.
+        try:
+            import onnxruntime as ort
+            sess = ort.InferenceSession(self.model_path, providers=["CPUExecutionProvider"])
+            inputs = sess.get_inputs()
+            if inputs:
+                shape = inputs[0].shape  # e.g. [1, 3, 1152, 1152] or [1, 3, 'h', 'w']
+                if len(shape) == 4:
+                    h, w = shape[2], shape[3]
+                    if isinstance(h, int) and isinstance(w, int) and h > 0 and w > 0:
+                        self.logger.info(f"Detected static ONNX input size: {h}x{w}")
+                        return max(h, w)
+                    self.logger.info("ONNX model has dynamic input shape; using default imgsz")
+                    return default
+        except Exception as e:
+            self.logger.warning(f"onnxruntime probe failed: {e}")
+
+        # Fallback: parse the protobuf with the onnx package if available.
+        try:
+            import onnx
+            m = onnx.load(self.model_path, load_external_data=False)
+            for inp in m.graph.input:
+                dims = inp.type.tensor_type.shape.dim
+                if len(dims) == 4:
+                    h = dims[2].dim_value
+                    w = dims[3].dim_value
+                    if h > 0 and w > 0:
+                        self.logger.info(f"Detected static ONNX input size (via onnx pkg): {h}x{w}")
+                        return max(int(h), int(w))
+        except Exception as e:
+            self.logger.warning(f"onnx package probe failed, falling back to {default}: {e}")
+
+        return default
 
     def _load_model(self):
         """Load YOLO model with explicit device selection."""
@@ -72,6 +153,24 @@ class DetectionEngine:
 
             # Load YOLO model (ONNX or PT)
             self.model = YOLO(self.model_path, task = 'detect')
+
+            # Detect the model's expected input size (fixes static-ONNX mismatches)
+            self.imgsz = self._detect_model_imgsz(default=640)
+
+            # Belt-and-suspenders: Ultralytics' predictor caches args on first call
+            # and sometimes ignores per-call imgsz for static ONNX backends.
+            # Setting overrides ensures the predictor picks up the right size.
+            try:
+                if hasattr(self.model, "overrides") and isinstance(self.model.overrides, dict):
+                    self.model.overrides["imgsz"] = self.imgsz
+                # Force predictor recreation so it picks up the new overrides.
+                if getattr(self.model, "predictor", None) is not None:
+                    self.model.predictor = None
+            except Exception as ovr_err:
+                self.logger.warning(f"Could not set model.overrides['imgsz']: {ovr_err}")
+
+            # One-time flag so we log the first inference shape, then stop.
+            self._first_call_logged = False
 
             # Bypass PyTorch's lock by directly assigning the dictionary to our own variable
             if self.model_path.endswith('.engine'):
@@ -115,6 +214,7 @@ class DetectionEngine:
 
             self.logger.info(f"Model loaded: {self.model_path}")
             self.logger.info(f"Using device: {self.device}")
+            self.logger.info(f"Inference image size: {self.imgsz}")
             self.logger.info(f"Available classes: {list(self.class_names.values())}")
             self.logger.info(
                 f"Allowed classes: {[self.class_names[i] for i in self.allowed_classes]}"
@@ -132,73 +232,65 @@ class DetectionEngine:
             raise
 
     def detect_and_track(self, frame: np.ndarray, persist_tracks: bool = True) -> List[Detection]:
-        """Run detection using the optimized TensorRT engine"""
+        """Run detection using the optimized TensorRT/ONNX/PT engine.
 
+        The lock is held only around GPU inference (Ultralytics + TensorRT
+        uses CUDA Graph capture on the default stream, so concurrent calls
+        from multiple workers must serialize there). Mask application and
+        result parsing run outside the lock so parallel workers don't
+        serialize on CPU-side work.
+        """
         try:
-            # Apply exclusion mask if one exists
-            if self.exclusion_mask is not None:
-                frame = cv2.bitwise_and(frame, frame, mask=self.exclusion_mask)
+            # Snapshot the mask reference. Atomic read; set_exclusion_zones
+            # only mutates this during setup, never during inference.
+            mask = self.exclusion_mask
+            if mask is not None:
+                frame = cv2.bitwise_and(frame, frame, mask=mask)
 
-            # 1. Build the dictionary of settings
             kwargs = {
                 'persist': persist_tracks,
                 'conf': self.confidence_threshold,
                 'tracker': self.tracker_config if self.tracker_config else 'bytetrack.yaml',
-
                 # --- The Jetson Orin Nano Speed Flags ---
-                'half': True,  # Prevents slow CPU->GPU FP32 casting
-                'verbose': False,  # Stops console print-spam from blocking the UI thread
-                'imgsz': 640  # Forces static TensorRT memory mapping
+                'half': True,           # Prevents slow CPU->GPU FP32 casting
+                'verbose': False,       # Stops console print-spam from blocking the UI thread
+                'imgsz': self.imgsz,    # Matches the model's exported input shape
             }
-
-            # 2. Add class filtering if specified
             if getattr(self, 'allowed_classes', None):
                 kwargs['classes'] = sorted(list(self.allowed_classes))
 
-            # 3. Run the high-performance inference
-            results = self.model.track(frame, **kwargs)
+            # Diagnostic: one-time log of the actual values flowing into Ultralytics.
+            if not getattr(self, "_first_call_logged", False):
+                overrides = getattr(self.model, "overrides", {})
+                self.logger.info(
+                    f"First inference — frame={frame.shape}, self.imgsz={self.imgsz}, "
+                    f"overrides.imgsz={overrides.get('imgsz') if isinstance(overrides, dict) else 'N/A'}, "
+                    f"kwargs.imgsz={kwargs['imgsz']}"
+                )
+                self._first_call_logged = True
 
-            # 4. Parse the results into our Detection dataclass
-            detections = []
-            if len(results) > 0 and len(results[0].boxes) > 0:
-                boxes = results[0].boxes
+            # Lock only the GPU inference + predictor mutation.
+            with self._lock:
+                results = self.model.track(frame, **kwargs)
 
-                # Check if we have tracking IDs
-                has_tracks = boxes.id is not None
+                # After the first call the predictor exists; force its imgsz to match
+                # the ONNX model's static shape in case Ultralytics defaulted to 640.
+                predictor = getattr(self.model, "predictor", None)
+                if predictor is not None:
+                    try:
+                        if getattr(predictor, "imgsz", None) != (self.imgsz, self.imgsz):
+                            predictor.imgsz = (self.imgsz, self.imgsz)
+                        if hasattr(predictor, "args") and getattr(predictor.args, "imgsz", None) != self.imgsz:
+                            predictor.args.imgsz = self.imgsz
+                    except Exception:
+                        pass
 
-                for i in range(len(boxes)):
-                    # Get basic box data
-                    x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy()
-                    conf = float(boxes.conf[i])
-                    cls_id = int(boxes.cls[i])
-
-                    # Skip if confidence is too low
-                    if conf < self.confidence_threshold:
-                        continue
-
-                    # Get track ID if available
-                    track_id = int(boxes.id[i]) if has_tracks else None
-
-                    # Calculate center and bottom points for counting logic
-                    cx = int((x1 + x2) / 2)
-                    cy = int((y1 + y2) / 2)
-                    bottom_y = int(y2)
-
-                    # Add to our standard detection list
-                    detections.append(Detection(
-                        track_id=track_id,
-                        class_id=cls_id,
-                        class_name=self.class_names.get(cls_id, f"class_{cls_id}"),
-                        bbox=(x1, y1, x2, y2),
-                        confidence=conf,
-                        center_point=(cx, cy),
-                        bottom_point=(cx, bottom_y)
-                    ))
-
-            return detections
+            # Parse vectorized, outside the lock. One bulk GPU->CPU transfer
+            # for the whole batch instead of N per-box .cpu() calls.
+            return self._parse_results(results, frame.shape)
 
         except Exception as e:
-            self.logger.error(f"Detection failed: {e}")
+            self._log_detection_error(e)
             return []
 
     def set_exclusion_zones(self, exclusion_zones: List, frame_shape: Tuple[int, int, int]):
@@ -209,25 +301,26 @@ class DetectionEngine:
             exclusion_zones: List of ExclusionZone objects with points_norm
             frame_shape: (height, width, channels) of the video frames
         """
-        if not exclusion_zones:
-            self.exclusion_mask = None
-            self.frame_shape = None
-            return
+        with self._lock:
+            if not exclusion_zones:
+                self.exclusion_mask = None
+                self.frame_shape = None
+                return
 
-        h, w = frame_shape[:2]
-        self.frame_shape = (h, w)
+            h, w = frame_shape[:2]
+            self.frame_shape = (h, w)
 
-        # Create white mask (255 = process, 0 = exclude)
-        self.exclusion_mask = np.ones((h, w), dtype=np.uint8) * 255
+            # Create white mask (255 = process, 0 = exclude)
+            self.exclusion_mask = np.ones((h, w), dtype=np.uint8) * 255
 
-        # Draw exclusion zones as black (0)
-        for zone in exclusion_zones:
-            # Denormalize points from normalized coordinates to pixel coordinates
-            pts_pixel = [(int(x * w), int(y * h)) for x, y in zone.points_norm]
-            pts = np.array(pts_pixel, dtype=np.int32)
-            cv2.fillPoly(self.exclusion_mask, [pts], 0)
+            # Draw exclusion zones as black (0)
+            for zone in exclusion_zones:
+                # Denormalize points from normalized coordinates to pixel coordinates
+                pts_pixel = [(int(x * w), int(y * h)) for x, y in zone.points_norm]
+                pts = np.array(pts_pixel, dtype=np.int32)
+                cv2.fillPoly(self.exclusion_mask, [pts], 0)
 
-        self.logger.info(f"Exclusion mask created: {len(exclusion_zones)} zones")
+            self.logger.info(f"Exclusion mask created: {len(exclusion_zones)} zones")
 
     def _apply_exclusion_mask(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -297,18 +390,29 @@ class DetectionEngine:
         cy = (bbox_int[:, 1] + bbox_int[:, 3]) // 2
         by = bbox_int[:, 3]  # bottom y
 
-        # Build detection objects
+        # Build detection objects. tolist() returns native Python ints,
+        # matching the Detection dataclass typing (and avoiding numpy ints
+        # leaking into downstream JSON serializers).
+        bbox_list = bbox_int.tolist()
+        class_list = class_np.tolist()
+        track_list = track_np.tolist()
+        conf_list = conf_np.tolist()
+        cx_list = cx.tolist()
+        cy_list = cy.tolist()
+        by_list = by.tolist()
+
         detections = []
-        for i in range(len(bbox_int)):
-            track_id = int(track_np[i]) if track_np[i] >= 0 else None
+        for i in range(len(bbox_list)):
+            tid = track_list[i]
+            cid = class_list[i]
             detections.append(Detection(
-                track_id=track_id,
-                class_id=int(class_np[i]),
-                class_name=self.class_names.get(int(class_np[i]), f"class_{class_np[i]}"),
-                bbox=tuple(bbox_int[i]),
-                confidence=float(conf_np[i]),
-                center_point=(int(cx[i]), int(cy[i])),
-                bottom_point=(int(cx[i]), int(by[i]))
+                track_id=tid if tid >= 0 else None,
+                class_id=cid,
+                class_name=self.class_names.get(cid, f"class_{cid}"),
+                bbox=tuple(bbox_list[i]),
+                confidence=conf_list[i],
+                center_point=(cx_list[i], cy_list[i]),
+                bottom_point=(cx_list[i], by_list[i])
             ))
 
         return detections
@@ -333,14 +437,18 @@ class DetectionEngine:
             'device': self.device
         }
 
-    def warmup(self, frame_size: Tuple[int, int] = (640, 640)):
+    def warmup(self, frame_size: Optional[Tuple[int, int]] = None):
         """
         Warm up the model with a dummy inference
 
         Args:
-            frame_size: (width, height) for dummy frame
+            frame_size: (width, height) for dummy frame. Defaults to the model's
+                expected input size so the warmup actually exercises the engine.
         """
         try:
+            if frame_size is None:
+                size = getattr(self, "imgsz", 640)
+                frame_size = (size, size)
             dummy_frame = np.zeros((frame_size[1], frame_size[0], 3), dtype=np.uint8)
             _ = self.detect_and_track(dummy_frame)
             self.logger.info("Model warmup completed")
