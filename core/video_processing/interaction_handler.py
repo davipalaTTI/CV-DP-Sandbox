@@ -55,7 +55,14 @@ class InteractionHandler:
             self.p._show_notification(f"Controls: {'ON' if self.p.show_controls else 'OFF'}", duration=1.0)
             return True
 
+        elif key == ord('v') or key == ord('V'):  # Toggle full live video view
+            if hasattr(self.p, 'toggle_live_view'):
+                self.p.toggle_live_view()
+            return True
+
         if key == ord('e') or key == ord('E'):
+            if hasattr(self.p, 'live_view_enabled') and not self.p.live_view_enabled:
+                self.p.toggle_live_view()
             self.p.edit_mode = not self.p.edit_mode
             self.p.create_mode = "none"
             self.p.temp_points.clear()

@@ -555,6 +555,16 @@ class VideoWorker:
             # Update counts
             events = self.counter.update_counts(detections, timestamp=self.video_current_time)
 
+            # Queue each newly-created event exactly once. The shared API batcher
+            # assigns it to the next wall-clock five-minute upload while this
+            # worker continues processing frames.
+            if events:
+                self.exporter.queue_api_events(
+                    events,
+                    video_source=self.video_path.name,
+                    segment_id=f"segment_{self.current_segment}"
+                )
+
             # Update heatmap if enabled
             if self.heatmap_acc is not None and detections:
                 boxes_xyxy = [det.bbox for det in detections]
@@ -722,7 +732,7 @@ class VideoWorker:
         """Release resources"""
         # --- NEW: Safely flush all data to the hard drive before closing! ---
         if hasattr(self, 'exporter') and self.exporter is not None:
-            self.exporter.shutdown()
+            self.exporter.shutdown(finalize_shared=False)
 
         # Save final heatmap if enabled - one heatmap per video with video timestamps only
         if self.heatmap_acc is not None:

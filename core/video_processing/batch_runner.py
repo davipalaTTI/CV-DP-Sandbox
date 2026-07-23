@@ -239,7 +239,9 @@ class BatchRunner:
 
             # Shut down the background threads cleanly!
             if hasattr(self, 'exporter') and self.exporter is not None:
-                self.exporter.shutdown()
+                # All workers have stopped, so seal and upload the final partial
+                # five-minute API batch before shutting down shared exporters.
+                self.exporter.shutdown(finalize_shared=True)
 
         return {
             "total_videos": len(total_results),

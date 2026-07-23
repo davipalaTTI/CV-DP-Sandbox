@@ -150,8 +150,9 @@ class ThreadedDetectionEngine:
                         pass
 
                 frames_processed += 1
-                if time.time() - last_log_time >= 10.0:
-                    fps = frames_processed / 10.0
+                elapsed = time.time() - last_log_time
+                if elapsed >= 10.0:
+                    fps = frames_processed / elapsed if elapsed > 0 else 0.0
                     self.logger.debug(f"[THREADED YOLO] Alive. Processed ~{fps:.1f} FPS")
                     frames_processed = 0
                     last_log_time = time.time()

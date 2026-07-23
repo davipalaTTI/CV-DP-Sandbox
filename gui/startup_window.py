@@ -20,6 +20,11 @@ class StartupWindow:
         # Scan for AXIS IP cameras
         self._network_cameras = get_available_axis_cameras()
 
+    @staticmethod
+    def _is_rtsp_url(source: object) -> bool:
+        """Return True when the configured source is an RTSP URL."""
+        return isinstance(source, str) and source.strip().lower().startswith(("rtsp://", "rtsps://"))
+
     def get_initial_config(self) -> Optional[AppConfig]:
         """
         Get initial configuration from user through GUI
@@ -103,6 +108,7 @@ class StartupWindow:
             'annotate_speed': tk.BooleanVar(value=True),
             'frame_skip': tk.IntVar(value=1),
             'interpolate_tracks': tk.BooleanVar(value=True),
+            'show_live_video': tk.BooleanVar(value=True),
             'max_parallel_videos': tk.IntVar(value=1),  # Number of videos to process in parallel
 
         }
@@ -144,15 +150,17 @@ class StartupWindow:
                 config_vars['model_path'].set(filename)
 
         def browse_input():
-            """Browse for input folder or video"""
-            if config_vars['input_type'].get() == "folder":
+            """Browse for folder/video inputs. RTSP URLs are typed directly."""
+            input_type = config_vars['input_type'].get()
+
+            if input_type == "folder":
                 folder = filedialog.askdirectory(
                     title="Select Input Folder",
                     parent=root
                 )
                 if folder:
                     config_vars['input_source'].set(folder)
-            else:  # video file
+            elif input_type == "video":
                 filetypes = [
                     ("Video Files", "*.mp4 *.avi *.mov *.mkv *.wmv *.flv"),
                     ("All Files", "*.*")
@@ -175,17 +183,27 @@ class StartupWindow:
                 config_vars['output_folder'].set(folder)
 
         def toggle_input_fields():
-            """Toggle input fields based on input type"""
+            """Toggle input widgets based on the selected source type."""
             input_type = config_vars['input_type'].get()
 
             if input_type == "camera":
+                input_source_label.config(text="Input Source:")
                 input_entry.config(state="disabled")
                 input_browse_btn.config(state="disabled")
                 camera_combo.config(state="readonly")
+                live_video_check.config(state="normal")
+            elif input_type == "rtsp":
+                input_source_label.config(text="RTSP URL:")
+                input_entry.config(state="normal")
+                input_browse_btn.config(state="disabled")
+                camera_combo.config(state="disabled")
+                live_video_check.config(state="normal")
             else:
+                input_source_label.config(text="Input Source:")
                 input_entry.config(state="normal")
                 input_browse_btn.config(state="normal")
                 camera_combo.config(state="disabled")
+                live_video_check.config(state="disabled")
 
         def validate_and_submit():
             """Validate inputs and create configuration"""
@@ -205,22 +223,36 @@ class StartupWindow:
             if input_type == "camera":
                 selected = config_vars['camera_index'].get().strip()
 
-                # Check if they selected an Axis camera from the list
+                # Check if they selected an Axis camera from the list. Those are RTSP URLs,
+                # but we still treat them as live camera sources.
                 if selected in self._network_cameras:
-                    source = self._network_cameras[selected]  # Gets the RTSP URL
+                    source = self._network_cameras[selected]
+                    input_type_enum = InputType.RTSP
                 else:
-                    # It's a standard webcam
+                    # It's a standard local webcam.
                     try:
                         source = int(selected.split(":", 1)[0].strip())
                     except Exception:
                         messagebox.showerror("Error", "Please select a valid camera.", parent=root)
                         return
+                    input_type_enum = InputType.CAMERA
 
                 is_camera = True
-                input_type_enum = InputType.CAMERA
+
+            elif input_type == "rtsp":
+                source = config_vars['input_source'].get().strip()
+                if not source:
+                    messagebox.showerror("Error", "Please enter an RTSP URL.", parent=root)
+                    return
+                if not self._is_rtsp_url(source):
+                    messagebox.showerror("Error", "RTSP URL must start with rtsp:// or rtsps://", parent=root)
+                    return
+
+                is_camera = True
+                input_type_enum = InputType.RTSP
 
             else:
-                source = config_vars['input_source'].get()
+                source = config_vars['input_source'].get().strip()
                 if not source:
                     messagebox.showerror("Error", f"Please select an input {input_type}.", parent=root)
                     return
@@ -286,6 +318,7 @@ class StartupWindow:
                 annotate_speed=bool(config_vars['annotate_speed'].get()),
                 frame_skip=int(config_vars['frame_skip'].get()),
                 interpolate_tracks=bool(config_vars['interpolate_tracks'].get()),
+                show_live_video=bool(config_vars['show_live_video'].get()) if is_camera else False,
                 max_parallel_videos=int(config_vars['max_parallel_videos'].get()),
                 # --- NEW: training params ---
                 training_mode=training_vars['training_mode'].get(),
@@ -332,10 +365,13 @@ class StartupWindow:
                        value="video", command=lambda: toggle_input_fields()).pack(side="left")
         tk.Radiobutton(input_frame, text="Camera", variable=config_vars['input_type'],
                        value="camera", command=lambda: toggle_input_fields()).pack(side="left")
+        tk.Radiobutton(input_frame, text="RTSP Stream", variable=config_vars['input_type'],
+                       value="rtsp", command=lambda: toggle_input_fields()).pack(side="left")
         row += 1
 
-        # Input source
-        tk.Label(scrollable_frame, text="Input Source:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
+        # Input source / RTSP URL
+        input_source_label = tk.Label(scrollable_frame, text="Input Source:")
+        input_source_label.grid(row=row, column=0, sticky="w", padx=10, pady=5)
         input_entry = tk.Entry(scrollable_frame, textvariable=config_vars['input_source'], width=50)
         input_entry.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
         input_browse_btn = tk.Button(scrollable_frame, text="Browse...", command=lambda: browse_input())
@@ -464,8 +500,15 @@ class StartupWindow:
             variable=config_vars['interpolate_tracks']  # Use directly from config_vars
         ).grid(row=0, column=4, columnspan=4, sticky="w", padx=5, pady=2)
 
+        live_video_check = tk.Checkbutton(
+            frame_skip_frame,
+            text="Enable Video View",
+            variable=config_vars['show_live_video']
+        )
+        live_video_check.grid(row=1, column=0, columnspan=5, sticky="w", padx=5, pady=2)
+
         # Parallel videos processing
-        tk.Label(frame_skip_frame, text="Parallel videos:").grid(row=1, column=0, sticky="w", padx=5, pady=4)
+        tk.Label(frame_skip_frame, text="Parallel videos:").grid(row=2, column=0, sticky="w", padx=5, pady=4)
 
         parallel_combo = ttk.Combobox(
             frame_skip_frame,
@@ -474,11 +517,11 @@ class StartupWindow:
             values=["1", "2", "3", "4"],
             width=8
         )
-        parallel_combo.grid(row=1, column=1, sticky="w", padx=5, pady=4)
+        parallel_combo.grid(row=2, column=1, sticky="w", padx=5, pady=4)
         parallel_combo.set("1")
 
         tk.Label(frame_skip_frame, text="(higher = faster but uses more GPU memory)").grid(
-            row=1, column=2, columnspan=4, sticky="w", padx=5, pady=4)
+            row=2, column=2, columnspan=4, sticky="w", padx=5, pady=4)
 
         # --- Training Mode (optional) ---
         row += 1
@@ -600,10 +643,14 @@ class StartupWindow:
                 config_vars['annotate_speed'].set(loaded_config.annotate_speed)
                 config_vars['frame_skip'].set(loaded_config.frame_skip)
                 config_vars['interpolate_tracks'].set(loaded_config.interpolate_tracks)
+                config_vars['show_live_video'].set(getattr(loaded_config, 'show_live_video', True))
                 config_vars['max_parallel_videos'].set(loaded_config.max_parallel_videos)
 
                 # Set input type and source
-                if loaded_config.is_camera:
+                if loaded_config.input_type == InputType.RTSP or self._is_rtsp_url(loaded_config.input_source):
+                    config_vars['input_type'].set("rtsp")
+                    config_vars['input_source'].set(str(loaded_config.input_source))
+                elif loaded_config.is_camera:
                     config_vars['input_type'].set("camera")
                     config_vars['camera_index'].set(str(loaded_config.input_source))
                 elif loaded_config.input_type == InputType.FOLDER:
@@ -834,6 +881,12 @@ class StartupWindow:
         if 'input_type' in config_dict:
             config_dict['input_type'] = InputType(config_dict['input_type'])
 
+        # Backward compatibility: old configs may have stored RTSP streams as
+        # input_type="camera" with a string input_source. Normalize them here.
+        if config_dict.get('input_type') == InputType.CAMERA and self._is_rtsp_url(config_dict.get('input_source')):
+            config_dict['input_type'] = InputType.RTSP
+            config_dict['is_camera'] = True
+
         # Handle set conversion
         if 'allowed_classes' in config_dict:
             config_dict['allowed_classes'] = set(config_dict['allowed_classes'])
@@ -876,7 +929,10 @@ class StartupWindow:
             errors.append("Model file does not exist")
 
         # Check input source
-        if config.is_camera:
+        if config.input_type == InputType.RTSP or self._is_rtsp_url(config.input_source):
+            if not self._is_rtsp_url(config.input_source):
+                errors.append("Invalid RTSP URL")
+        elif config.is_camera:
             if not isinstance(config.input_source, int) or config.input_source < 0:
                 errors.append("Invalid camera index")
         else:
@@ -922,6 +978,7 @@ class StartupWindow:
             meters_per_pixel=0.0,
             speed_smooth_window=5,
             annotate_speed=True,
+            show_live_video=True,
         )
 
     def center_window(self, window):

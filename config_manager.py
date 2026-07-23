@@ -18,6 +18,7 @@ class InputType(Enum):
     CAMERA = "camera"
     FOLDER = "folder"
     VIDEO = "video"
+    RTSP = "rtsp"
 
 @dataclass
 class CountingLine:
@@ -76,6 +77,7 @@ class AppConfig:
     min_track_length: int = 3
     frame_skip: int = 1  # Process every Nth frame (1 = no skip)
     interpolate_tracks: bool = True  # Interpolate positions for skipped frames
+    show_live_video: bool = True  # Camera mode: start with full annotated video view enabled by default
 
     # --- Heatmap options ---
     enable_heatmap: bool = False

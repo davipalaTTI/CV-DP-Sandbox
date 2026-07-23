@@ -48,6 +48,13 @@ class CameraRunner:
         self.show_stats = True
         self.show_controls = True
         self.ui_minimized = False
+        self.live_window_name = "Live Object Counter"
+        self.status_window_name = "Live Counter Status"
+        self.live_view_enabled = bool(getattr(config, 'show_live_video', True))
+        self._live_window_created = False
+        self._status_window_created = False
+        self._last_status_draw_time = 0.0
+        self._status_frame = np.zeros((180, 460, 3), dtype=np.uint8)
 
         # Frame skipping & Mouse tracking (Required by Visualizer)
         self.frame_skip = config.frame_skip
@@ -150,28 +157,47 @@ class CameraRunner:
         )
         return counter
 
+    @staticmethod
+    def _is_rtsp_source(source: object) -> bool:
+        return isinstance(source, str) and source.strip().lower().startswith(("rtsp://", "rtsps://"))
+
     def _initialize_camera(self) -> bool:
         try:
-            self.cap = cv2.VideoCapture(self.config.input_source)
+            source = self.config.input_source
+            is_rtsp = self._is_rtsp_source(source)
+
+            # RTSP streams are still live sources, so they use CameraRunner.
+            # CAP_FFMPEG is preferred for RTSP when OpenCV was built with FFmpeg support;
+            # local webcams keep the default backend.
+            if is_rtsp:
+                self.cap = cv2.VideoCapture(str(source), cv2.CAP_FFMPEG)
+            else:
+                self.cap = cv2.VideoCapture(source)
+
             if not self.cap.isOpened():
-                self.logger.error(f"Failed to open camera {self.config.input_source}")
+                source_type = "RTSP stream" if is_rtsp else "camera"
+                self.logger.error(f"Failed to open {source_type}: {source}")
                 return False
 
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.display_width)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.display_height)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            # Width/FPS setters are useful for local webcams, but RTSP stream dimensions
+            # are usually controlled by the camera/server and these setters may be ignored.
+            if not is_rtsp:
+                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.display_width)
+                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.display_height)
+                self.cap.set(cv2.CAP_PROP_FPS, 30)
 
             actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
 
             self.video_fps = actual_fps if actual_fps > 0 else 30.0
-            self.logger.info(f"Camera initialized: {actual_width}x{actual_height} @ {actual_fps}fps")
+            source_type = "RTSP stream" if is_rtsp else "Camera"
+            self.logger.info(f"{source_type} initialized: {actual_width}x{actual_height} @ {actual_fps}fps")
 
             self.cap = AsyncCameraReader(self.cap)
             return True
         except Exception as e:
-            self.logger.error(f"Camera initialization failed: {e}")
+            self.logger.error(f"Camera/stream initialization failed: {e}")
             return False
 
     def _initialize_video_writer(self, filename: Optional[str] = None, frame: Optional[np.ndarray] = None) -> bool:
@@ -241,39 +267,36 @@ class CameraRunner:
         self.is_running = True
         self.stats.start_time = time.time()
 
-        cv2.namedWindow("Live Object Counter", cv2.WINDOW_NORMAL)
-        cv2.setMouseCallback("Live Object Counter", self.interaction_handler.mouse_callback)
-
         first_frame = True
 
         try:
             while self.is_running and not self.stop_requested:
                 # --- CAMERA PRODUCER ---
-                # Grab a frame from the camera and shove it into the YOLO queue
-                ret, raw_frame = self.cap.read()
-                if ret:
-                    if not self.camera_to_engine_queue.full():
+                # Only read/copy a camera frame when the YOLO queue has room.
+                # AsyncCameraReader.read() returns a copy, so reading while the queue
+                # is full wastes CPU on frames that will be discarded anyway.
+                if not self.camera_to_engine_queue.full():
+                    ret, raw_frame = self.cap.read()
+                    if ret:
                         self.camera_to_engine_queue.put(raw_frame)
 
-                    if first_frame:
-                        h, w = raw_frame.shape[:2]
-                        self.fit_center("Live Object Counter", w, h, frac=0.9)
+                        if first_frame:
+                            h, w = raw_frame.shape[:2]
 
-                        # =========================================================
-                        # --- FIX: THE RESOLUTION MISMATCH ---
-                        # We MUST rebuild the Counting Zones and Exclusion Masks
-                        # right now using the absolute literal frame size (w, h),
-                        # otherwise the math zones won't match the physical screen!
-                        # =========================================================
-                        actual_size = (w, h)
-                        if self.counter.frame_size != actual_size:
-                            self.counter.set_frame_size(actual_size)
+                            # Build the counter/exclusion math from the actual camera frame size.
+                            actual_size = (w, h)
+                            if self.counter.frame_size != actual_size:
+                                self.counter.set_frame_size(actual_size)
 
-                        # Force the AI Engine to update its exclusion mask too!
-                        if getattr(self.config, 'exclusion_zones', None):
-                            self.detection_engine.set_exclusion_zones(self.config.exclusion_zones, raw_frame.shape)
+                            if getattr(self.config, 'exclusion_zones', None):
+                                self.detection_engine.set_exclusion_zones(self.config.exclusion_zones, raw_frame.shape)
 
-                        first_frame = False
+                            if self.live_view_enabled:
+                                self._ensure_live_window(w, h)
+                            else:
+                                self._ensure_status_window()
+
+                            first_frame = False
 
                 # 2. Process Detections
                 try:
@@ -283,6 +306,15 @@ class CameraRunner:
                     self.video_current_time = datetime.now()
 
                     events = self.counter.update_counts(detections, timestamp=self.video_current_time)
+                    self.stats.total_detections += len(detections)
+
+                    if events:
+                        segment_id = f"hour_{self.current_segment_start_dt.hour:02d}"
+                        self.exporter.queue_api_events(
+                            events,
+                            video_source="LIVE CAMERA",
+                            segment_id=segment_id
+                        )
 
                     # --- NEW: Capture training frames from the live camera! ---
                     if self.training_capture:
@@ -298,9 +330,14 @@ class CameraRunner:
                         if boxes_xyxy:
                             self.heatmap_acc.update_from_boxes(boxes_xyxy, weight=1.2)
 
-                    display_frame = self.visualizer.draw_all(self, processed_frame, detections)
+                    # Only draw the expensive overlays when needed:
+                    # - full live view is open, or
+                    # - save_video is enabled and we need an annotated recording.
+                    display_frame = None
+                    if self.live_view_enabled or self.config.save_video:
+                        display_frame = self.visualizer.draw_all(self, processed_frame, detections)
 
-                    if self.config.save_video:
+                    if self.config.save_video and display_frame is not None:
                         self._save_video_frame(display_frame)
 
                     if self._should_rollover_segment():
@@ -309,10 +346,19 @@ class CameraRunner:
                     self._trigger_live_export(force=False)
                     self._update_stats(len(events) if events else 0)
 
-                    cv2.imshow("Live Object Counter", display_frame)
+                    if self.live_view_enabled:
+                        self._ensure_live_window(processed_frame.shape[1], processed_frame.shape[0])
+                        cv2.imshow(self.live_window_name, display_frame)
+                    else:
+                        self._ensure_status_window()
+                        self._show_status_window()
 
                 except Empty:
-                    pass
+                    if self.live_view_enabled:
+                        self._ensure_live_window()
+                    else:
+                        self._ensure_status_window()
+                        self._show_status_window()
 
                 # 3. Handle UI Inputs
                 key_raw = cv2.waitKey(1)
@@ -328,6 +374,81 @@ class CameraRunner:
             self.cleanup()
 
         return self._get_final_results()
+
+    def _ensure_live_window(self, w: Optional[int] = None, h: Optional[int] = None) -> None:
+        if self._status_window_created:
+            try:
+                cv2.destroyWindow(self.status_window_name)
+            except cv2.error:
+                pass
+            self._status_window_created = False
+
+        if not self._live_window_created:
+            cv2.namedWindow(self.live_window_name, cv2.WINDOW_NORMAL)
+            cv2.setMouseCallback(self.live_window_name, self.interaction_handler.mouse_callback)
+            if w and h:
+                self.fit_center(self.live_window_name, w, h, frac=0.9)
+            self._live_window_created = True
+
+    def _ensure_status_window(self) -> None:
+        if self._live_window_created:
+            try:
+                cv2.destroyWindow(self.live_window_name)
+            except cv2.error:
+                pass
+            self._live_window_created = False
+
+        if not self._status_window_created:
+            cv2.namedWindow(self.status_window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(self.status_window_name, 460, 180)
+            self._status_window_created = True
+
+    def _show_status_window(self) -> None:
+        # Keep the status window cheap: redraw a small static panel at most 4 times/second.
+        now = time.time()
+        if now - self._last_status_draw_time < 0.25:
+            cv2.imshow(self.status_window_name, self._status_frame)
+            return
+
+        self._last_status_draw_time = now
+        frame = np.zeros_like(self._status_frame)
+        lines = [
+            "Live camera processing",
+            f"View: OFF   Press V to open video",
+            f"FPS: {self.stats.fps:.1f}",
+            f"Frames: {self.stats.frames_processed}",
+            f"Events: {self.stats.total_events}",
+            f"Objects: {len(self.counter.object_states)}",
+            "ESC: exit   V: toggle view",
+        ]
+
+        y = 28
+        for i, text in enumerate(lines):
+            scale = 0.65 if i == 0 else 0.5
+            thickness = 2 if i == 0 else 1
+            cv2.putText(frame, text, (14, y), cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), thickness)
+            y += 24
+
+        self._status_frame = frame
+        cv2.imshow(self.status_window_name, self._status_frame)
+
+    def toggle_live_view(self) -> None:
+        self.live_view_enabled = not self.live_view_enabled
+        state = "ON" if self.live_view_enabled else "OFF"
+        self.logger.info(f"Live video view: {state}")
+
+        if self.live_view_enabled:
+            frame = getattr(self, 'last_frame', None)
+            if frame is not None:
+                h, w = frame.shape[:2]
+                self._ensure_live_window(w, h)
+        else:
+            self.edit_mode = False
+            self.dragging = False
+            self.drag_target = None
+            self.create_mode = "none"
+            self.temp_points.clear()
+            self._ensure_status_window()
 
     # --- HELPERS, EXPORTS, & CLEANUP ---
     def _save_video_frame(self, clean_frame: np.ndarray) -> None:
@@ -522,7 +643,7 @@ class CameraRunner:
     def cleanup(self):
         try:
             if hasattr(self, 'exporter') and self.exporter is not None:
-                self.exporter.shutdown()
+                self.exporter.shutdown(finalize_shared=True)
             if self.cap:
                 self.cap.release()
             if self.video_writer:

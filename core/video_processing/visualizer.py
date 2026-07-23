@@ -320,6 +320,7 @@ class Visualizer:
             controls = [
                 "Controls:",
                 "ESC - Exit   SPACE - Pause/Resume",
+                "V - Hide/Show Video",
                 "R - Reset counts   S - Save stats",
                 f"E - Edit Mode - {'ON' if context.edit_mode else 'OFF'}",
                 "M - Toggle stats   C - Toggle controls",

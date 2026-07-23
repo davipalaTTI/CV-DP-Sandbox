@@ -3,51 +3,36 @@
   <component name="AutoImportSettings">
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
+  <component name="BackgroundAgentGlobalSettings">
+    <option name="selectedModelId" value="auto" />
+  </component>
   <component name="ChangeListManager">
     <list default="true" id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="Refractor Code Base">
-      <change afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/geometry_math.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/tracking/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/tracking/line_math.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/tracking/schemas.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/tracking/tracker.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/tracking/zone_math.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/video_processing/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/video_processing/async_io.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/video_processing/batch_runner.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/video_processing/camera_runner.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/video_processing/interaction_handler.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/video_processing/stats.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/video_processing/visualizer.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/video_processing/worker.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/core/visualizer_heatmap.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/gui/startup_window.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/utils/cli_parser.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/utils/constants.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/utils/file_io.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/utils/logger.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/utils/network.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/utils/profiling.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/utils/structures.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/utils/system_checks.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/utils/video_utils.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/config_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/config_manager.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/counter_logic.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/detection_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/detection_engine.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/video_processor.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui/gui_setup.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/gui_setup.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/gui/progress_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/progress_window.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/folder_monitor.py" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/folder_monitor.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/video_processing/async_io.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/async_io.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/video_processing/batch_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/batch_runner.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/video_processing/camera_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/camera_runner.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/video_processing/interaction_handler.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/interaction_handler.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/video_processing/stats.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/stats.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/video_processing/visualizer.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/visualizer.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/video_processing/worker.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/worker.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/startup_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/startup_window.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/utils/results_export.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/results_export.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/utils/utils.py" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="CopilotPersistence">
+    <persistenceIdMap>
+      <entry key="_C:/Users/D-Palacios/PycharmProjects/CV-DP-Sandbox" value="36IULunfjDSQ5dhu1JiOHSzxZcf" />
+    </persistenceIdMap>
+  </component>
+  <component name="EmbeddingIndexingInfo">
+    <option name="cachedIndexableFilesCount" value="1727" />
   </component>
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
@@ -73,46 +58,135 @@
 }</component>
   <component name="GithubPullRequestsUISettings">{
   &quot;selectedUrlAndAccountId&quot;: {
-    &quot;url&quot;: &quot;https://github.com/davipalaTTI/CV-DP-Sandbox.git&quot;,
+    &quot;url&quot;: &quot;https://github.com/davipalaTTI/CV-DP-Sandbox&quot;,
     &quot;accountId&quot;: &quot;3b35a167-9767-459e-bc57-e82b33ba3181&quot;
   }
 }</component>
+  <component name="MarkdownSettingsMigration">
+    <option name="stateVersion" value="1" />
+  </component>
+  <component name="McpProjectServerCommands">
+    <commands />
+    <urls />
+  </component>
+  <component name="NextEditCompletionFeaturesState">
+    <decayedCancelled>
+      <entry key="MS100" value="1.0066158806232204" />
+      <entry key="MS500" value="1.449710193392015" />
+      <entry key="S2" value="3.354561170893809" />
+      <entry key="S5" value="6.714028080013292" />
+      <entry key="S10" value="10.391931556748357" />
+      <entry key="S30" value="15.235767388660358" />
+      <entry key="S60" value="16.97249778953003" />
+      <entry key="M2" value="18.00336929687056" />
+      <entry key="M5" value="21.700094311058034" />
+      <entry key="M10" value="35.697363927690375" />
+      <entry key="M15" value="52.85825081998764" />
+      <entry key="M30" value="93.09104199816683" />
+      <entry key="H1" value="131.6337844367086" />
+      <entry key="H2" value="158.73046001396858" />
+      <entry key="H4" value="174.85576989036593" />
+      <entry key="D1" value="189.82499177750358" />
+      <entry key="W1" value="192.54258096103558" />
+    </decayedCancelled>
+    <decayedSelected>
+      <entry key="MS100" value="0.0" />
+      <entry key="MS500" value="0.0" />
+      <entry key="S2" value="0.0" />
+      <entry key="S5" value="0.0" />
+      <entry key="S10" value="0.0" />
+      <entry key="S30" value="0.0" />
+      <entry key="S60" value="0.0" />
+      <entry key="M2" value="0.0" />
+      <entry key="M5" value="0.0" />
+      <entry key="M10" value="0.0" />
+      <entry key="M15" value="0.0" />
+      <entry key="M30" value="0.0" />
+      <entry key="H1" value="0.0" />
+      <entry key="H2" value="0.0" />
+      <entry key="H4" value="0.0" />
+      <entry key="D1" value="0.0" />
+      <entry key="W1" value="0.0" />
+    </decayedSelected>
+    <decayedShown>
+      <entry key="MS100" value="0.38870641233760156" />
+      <entry key="MS500" value="1.2418795329223924" />
+      <entry key="S2" value="3.202064358742141" />
+      <entry key="S5" value="6.580488488628564" />
+      <entry key="S10" value="10.296289119692206" />
+      <entry key="S30" value="15.193409858071048" />
+      <entry key="S60" value="16.949598941930486" />
+      <entry key="M2" value="17.9914472813435" />
+      <entry key="M5" value="21.695149306960246" />
+      <entry key="M10" value="35.694731587553335" />
+      <entry key="M15" value="52.85637021827892" />
+      <entry key="M30" value="93.08995300459176" />
+      <entry key="H1" value="131.63316800448266" />
+      <entry key="H2" value="158.73012637115258" />
+      <entry key="H4" value="174.85559548179944" />
+      <entry key="D1" value="189.82496153349067" />
+      <entry key="W1" value="192.54257660993673" />
+    </decayedShown>
+  </component>
   <component name="ProjectColorInfo">{
-  &quot;associatedIndex&quot;: 6
+  &quot;associatedIndex&quot;: 4
 }</component>
   <component name="ProjectId" id="36IULunfjDSQ5dhu1JiOHSzxZcf" />
+  <component name="ProjectSessionTemplates">
+    <option name="panelTemplate">
+      <template>
+        <option name="modeId" value="Agent" />
+        <option name="model">
+          <model>
+            <option name="modelType" value="builtin_id" />
+            <option name="modelValue" value="auto" />
+          </model>
+        </option>
+        <option name="targetType" value="BACKGROUND" />
+        <option name="worktreeMode" value="WORKSPACE" />
+      </template>
+    </option>
+  </component>
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ASKED_MARK_IGNORED_FILES_AS_EXCLUDED": "true",
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.main.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "master",
-    "last_opened_file_path": "C:/Users/D-Palacios/PycharmProjects/CV-DP-Sandbox",
-    "settings.editor.selected.configurable": "preferences.pluginManager"
-  },
-  "keyToStringList": {
-    "com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File": [
-      "GitIgnore"
-    ]
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Python.main.executor&quot;: &quot;Run&quot;,
+    &quot;Python.test_rtsp.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.MCP Project settings loaded&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1&quot;: &quot;true&quot;,
+    &quot;copilot.chat.legacySessionMetadata.migrated&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;C:/Users/D-Palacios/PycharmProjects/CV-DP-Sandbox/models&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;ml.llm.LLMThirdPartyAiProvidersConfigurable&quot;,
+    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox\models" />
+      <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox\gui" />
+      <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox\core\video_processing" />
       <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox\core\video_processing" />
+      <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox" />
       <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox\models" />
       <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox\scripts" />
       <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox\utils" />
-      <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox\gui" />
-      <recent name="C:\Users\D-Palacios\PycharmProjects\CV-DP-Sandbox\core" />
     </key>
   </component>
   <component name="RunManager">
@@ -125,11 +199,12 @@
         <env name="PYTHONUNBUFFERED" value="1" />
       </envs>
       <option name="SDK_HOME" value="" />
-      <option name="SDK_NAME" value="Python 3.9 (CV-DP-Sandbox)" />
       <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
       <option name="IS_MODULE_SDK" value="false" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="true" />
+      <option name="RUN_TOOL" value="" />
       <option name="SCRIPT_NAME" value="$PROJECT_DIR$/main.py" />
       <option name="PARAMETERS" value="" />
       <option name="SHOW_COMMAND_LINE" value="false" />
@@ -149,10 +224,11 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-python-sdk-b3d66beaba9a-c6efb3732140-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-252.26199.168" />
+        <option value="bundled-python-sdk-50341a9f1f9c-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.26222.68" />
       </set>
     </attachedChunks>
   </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
     <task active="true" id="Default" summary="Default task">
       <changelist id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="" />
@@ -283,6 +359,9 @@
     </task>
     <option name="localTasksCounter" value="16" />
     <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
     <option name="TAB_STATES">
