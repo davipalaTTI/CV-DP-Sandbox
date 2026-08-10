@@ -14,7 +14,7 @@ from queue import Queue as ThreadQueue
 from queue import Empty
 import tkinter as tk
 
-from config_manager import AppConfig, resolve_colormap
+from config_manager import AppConfig, resolve_colormap, save_app_config
 from core.detection_engine import DetectionEngine
 from core.tracking import ObjectCounter, CountingEvent
 from core.training_mode import TrainingModeCapture, TrainingConfig
@@ -61,6 +61,12 @@ class CameraRunner:
         )
         self.stop_at = getattr(config, 'runtime_stop_at', None)
         self.source_name = str(getattr(config, 'source_name', '') or 'LIVE CAMERA')
+        self.runtime_config_path = Path(
+            getattr(config, 'runtime_config_path', '')
+            or (Path(config.output_folder) / "config.json")
+        ).expanduser()
+        self.config_persist_lock = threading.Lock()
+        self._config_dirty = False
         self.window_index = max(0, int(getattr(config, 'runtime_window_index', 0)))
         self.window_count = max(1, int(getattr(config, 'runtime_window_count', 1)))
         self.camera_stall_timeout = max(
@@ -802,6 +808,8 @@ class CameraRunner:
 
     def cleanup(self):
         try:
+            if self._config_dirty:
+                self._persist_runtime_config("final cleanup")
             if hasattr(self, 'exporter') and self.exporter is not None:
                 self.exporter.shutdown(finalize_shared=True)
             if self.cap:
@@ -813,6 +821,23 @@ class CameraRunner:
             self.logger.info("Camera runner cleanup completed")
         except Exception as e:
             self.logger.warning(f"Cleanup error: {e}")
+
+    def _persist_runtime_config(self, reason: str) -> bool:
+        """Persist completed live geometry edits without exposing a partial file."""
+        self._config_dirty = True
+        try:
+            with self.config_persist_lock:
+                saved_path = save_app_config(self.config, self.runtime_config_path)
+            self.config.runtime_config_path = str(saved_path)
+            self.runtime_config_path = saved_path
+            self._config_dirty = False
+            self.logger.info("Runtime config saved after %s: %s", reason, saved_path)
+            self._show_notification("Configuration saved", duration=1.5)
+            return True
+        except Exception as exc:
+            self.logger.error("Could not save runtime config after %s: %s", reason, exc)
+            self._show_notification("Configuration save failed", duration=3.0)
+            return False
 
     def fit_center(self, name, w, h, frac=0.9):
         r = tk.Tk()

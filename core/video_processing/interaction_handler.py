@@ -178,9 +178,13 @@ class InteractionHandler:
             self._apply_drag((x, y))
 
         elif event == cv2.EVENT_LBUTTONUP and self.p.dragging:
+            changed_target = self.p.drag_target
             self._apply_drag((x, y))
             self.p.dragging = False
             self.p.drag_target = None
+            if changed_target is not None:
+                kind, name, _extra = changed_target
+                self._persist_config_change(f"moving {kind} '{name}'")
 
         # Line/Zone Creation Logic
         if self.p.create_mode == "line":
@@ -250,6 +254,12 @@ class InteractionHandler:
             self.p.tk_root.attributes('-topmost', True)
         return self.p.tk_root
 
+    def _persist_config_change(self, reason: str) -> bool:
+        persist = getattr(self.p, "_persist_runtime_config", None)
+        if persist is None:
+            return False
+        return bool(persist(reason))
+
     def _finalize_new_line(self, p1: tuple[int, int], p2: tuple[int, int]) -> None:
         try:
             root = self._ensure_tk_top()
@@ -283,6 +293,7 @@ class InteractionHandler:
             self.p.config.lines_config.append(new_line)
             self.p.logger.info(
                 f"Added new line '{name}' ({props['direction']}) with {len(new_line.classes)} class filters.")
+            self._persist_config_change(f"adding line '{name}'")
 
         except Exception as e:
             self.p.logger.error(f"Finalize new line failed: {e}")
@@ -319,6 +330,7 @@ class InteractionHandler:
             self.p.config.zones_config.append(new_zone)
             self.p.logger.info(
                 f"Added new zone '{name}' with {len(new_zone.classes)} class filters and {len(points_norm)} vertices.")
+            self._persist_config_change(f"adding zone '{name}'")
         except Exception as e:
             self.p.logger.error(f"Finalize new zone failed: {e}")
 
@@ -329,6 +341,7 @@ class InteractionHandler:
             if removed:
                 self.p.config.zones_config = [z for z in self.p.config.zones_config if z.name != zn]
                 self.p.logger.info(f"Deleted zone '{zn}'.")
+                self._persist_config_change(f"deleting zone '{zn}'")
                 return
 
         ln = self.p.counter.find_nearest_line(pt, max_dist_px=self.p.drag_threshold * 1.5)
@@ -337,6 +350,7 @@ class InteractionHandler:
             if removed:
                 self.p.config.lines_config = [l for l in self.p.config.lines_config if l.name != ln]
                 self.p.logger.info(f"Deleted line '{ln}'.")
+                self._persist_config_change(f"deleting line '{ln}'")
                 return
 
         self.p.logger.info("Nothing to delete at cursor.")

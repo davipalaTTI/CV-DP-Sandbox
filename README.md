@@ -416,6 +416,12 @@ After the configuration dialog, the interactive setup window appears:
 | `X` | Enter Exclusion zone mode |
 | `ESC` | Cancel current drawing |
 | `D` / `Delete` | Delete item under cursor |
+
+Completed runtime edits are saved automatically. Moving an endpoint/vertex, adding
+a line or zone, or deleting one atomically updates the exact loaded config file
+(normally `<output_folder>/config.json`). A later restart therefore uses the most
+recent geometry. The `S` key continues to save a statistics snapshot; no separate
+config-save key is required in runtime edit mode.
 | `Enter` | Finish setup and start processing |
 | `S` | Save current configuration |
 | `Q` | Quit setup |

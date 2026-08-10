@@ -8,7 +8,10 @@ Handles all configuration aspects including:
 - Default settings management
 """
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+import json
+import os
+from pathlib import Path
 from typing import List, Tuple, Optional, Set, Union
 import cv2
 from enum import Enum
@@ -140,6 +143,42 @@ class AppConfig:
 
     # API Connection
     enable_api_upload: bool = False
+
+
+def app_config_to_dict(config: AppConfig) -> dict:
+    """Convert an application config into its durable JSON/YAML representation."""
+    config_dict = asdict(config)
+    config_dict["input_type"] = config.input_type.value
+    config_dict["allowed_classes"] = sorted(int(value) for value in config.allowed_classes)
+    return config_dict
+
+
+def save_app_config(config: AppConfig, filepath: Union[str, Path]) -> Path:
+    """Atomically persist a complete application config and return its path."""
+    filepath = Path(filepath).expanduser()
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = filepath.with_name(f".{filepath.name}.tmp")
+    config_dict = app_config_to_dict(config)
+    try:
+        if filepath.suffix.lower() in {".yaml", ".yml"}:
+            import yaml
+
+            content = yaml.safe_dump(config_dict, default_flow_style=False, sort_keys=False)
+        else:
+            content = json.dumps(config_dict, indent=2)
+        with temp_path.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp_path.replace(filepath)
+    except Exception:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return filepath.resolve()
 
 def resolve_colormap(name: str) -> int:
     """

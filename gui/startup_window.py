@@ -5,7 +5,6 @@ import threading
 import time
 from typing import Callable, Optional, Dict, List, Set, Tuple, Union
 from pathlib import Path
-from dataclasses import asdict
 import cv2
 import json
 import yaml
@@ -17,6 +16,8 @@ from config_manager import (
     DeploymentRequest,
     ExclusionZone,
     InputType,
+    app_config_to_dict,
+    save_app_config,
 )
 from utils.network import get_available_axis_cameras
 from utils.video_utils import load_source_preview
@@ -1062,63 +1063,9 @@ class StartupWindow:
             True if successful, False otherwise
         """
         try:
-            filepath = Path(filepath)
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-
-            # Convert to dictionary with full serialization
-            config_dict = self._config_to_dict(config)
-
-            # Ensure all complex objects are properly serialized
-            # Convert lines_config
-            if hasattr(config, 'lines_config') and config.lines_config:
-                config_dict['lines_config'] = [
-                    {
-                        'name': line.name,
-                        'start_norm': line.start_norm,
-                        'end_norm': line.end_norm,
-                        'direction': line.direction,
-                        'classes': line.classes,
-                        'enabled': line.enabled,
-                        'poi_mode': getattr(line, 'poi_mode', 'center')
-                    }
-                    for line in config.lines_config
-                ]
-
-            # Convert zones_config
-            if hasattr(config, 'zones_config') and config.zones_config:
-                config_dict['zones_config'] = [
-                    {
-                        'name': zone.name,
-                        'points_norm': zone.points_norm,
-                        'classes': zone.classes,
-                        'enabled': zone.enabled,
-                        'track_max_concurrent': getattr(zone, 'track_max_concurrent', False),
-                        'show_peak_overlay': getattr(zone, 'show_peak_overlay', True),
-                        'poi_mode': getattr(zone, 'poi_mode', 'center')
-                    }
-                    for zone in config.zones_config
-                ]
-
-            # Convert exclusion_zones
-            if hasattr(config, 'exclusion_zones') and config.exclusion_zones:
-                config_dict['exclusion_zones'] = [
-                    {
-                        'name': exc.name,
-                        'points_norm': exc.points_norm,
-                        'enabled': exc.enabled
-                    }
-                    for exc in config.exclusion_zones
-                ]
-
-            # Determine format from extension
-            if filepath.suffix.lower() in ['.yaml', '.yml']:
-                with open(filepath, 'w') as f:
-                    yaml.dump(config_dict, f, default_flow_style=False, indent=2)
-            else:  # Default to JSON
-                with open(filepath, 'w') as f:
-                    json.dump(config_dict, f, indent=2)
-
-            self.logger.info(f"Configuration saved to {filepath}")
+            saved_path = save_app_config(config, filepath)
+            config.runtime_config_path = str(saved_path)
+            self.logger.info(f"Configuration saved to {saved_path}")
             return True
 
         except Exception as e:
@@ -1151,6 +1098,7 @@ class StartupWindow:
 
             # Convert to AppConfig
             config = self._dict_to_config(config_dict)
+            config.runtime_config_path = str(filepath.resolve())
             self.logger.info(f"Configuration loaded from {filepath}")
             return config
 
@@ -1160,13 +1108,7 @@ class StartupWindow:
 
     def _config_to_dict(self, config: AppConfig) -> Dict:
         """Convert AppConfig to dictionary for serialization"""
-        config_dict = asdict(config)
-
-        # Convert enums and sets to serializable types
-        config_dict['input_type'] = config.input_type.value
-        config_dict['allowed_classes'] = list(config.allowed_classes)
-
-        return config_dict
+        return app_config_to_dict(config)
 
     def _dict_to_config(self, config_dict: Dict) -> AppConfig:
         """Convert dictionary to AppConfig"""
