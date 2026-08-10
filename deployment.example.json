@@ -1,0 +1,31 @@
+{
+  "python_executable": ".venv/Scripts/python.exe",
+  "poll_seconds": 5,
+  "restart_delay_seconds": 15,
+  "shutdown_grace_seconds": 30,
+  "debug": false,
+  "cameras": [
+    {
+      "name": "north_gate",
+      "config": "camera_outputs/north_gate/config.json",
+      "log_file": "camera_outputs/north_gate/north_gate.log",
+      "enabled": true,
+      "schedule": {
+        "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+        "start": "07:00",
+        "end": "18:30"
+      }
+    },
+    {
+      "name": "south_gate",
+      "config": "camera_outputs/south_gate/config.json",
+      "log_file": "camera_outputs/south_gate/south_gate.log",
+      "enabled": true,
+      "schedule": {
+        "days": ["mon", "tue", "wed", "thu", "fri"],
+        "start": "07:00",
+        "end": "18:30"
+      }
+    }
+  ]
+}

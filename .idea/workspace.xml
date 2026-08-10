@@ -8,18 +8,21 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="7d37811d-e646-4796-a26c-968fcc3bce6c" name="Changes" comment="Refractor Code Base">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/config_manager.py" beforeDir="false" afterPath="$PROJECT_DIR$/config_manager.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/core/detection_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/detection_engine.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/core/video_processing/async_io.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/async_io.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/core/video_processing/batch_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/batch_runner.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/core/video_processing/camera_runner.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/camera_runner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/video_processing/interaction_handler.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/interaction_handler.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/video_processing/stats.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/stats.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/video_processing/visualizer.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/visualizer.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/core/video_processing/worker.py" beforeDir="false" afterPath="$PROJECT_DIR$/core/video_processing/worker.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/gui/gui_setup.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/gui_setup.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/gui/startup_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/gui/startup_window.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/utils/cli_parser.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/cli_parser.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/utils/profiling.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/profiling.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/utils/results_export.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/results_export.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/utils/video_utils.py" beforeDir="false" afterPath="$PROJECT_DIR$/utils/video_utils.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -32,7 +35,7 @@
     </persistenceIdMap>
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="1727" />
+    <option name="cachedIndexableFilesCount" value="1774" />
   </component>
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
@@ -71,23 +74,23 @@
   </component>
   <component name="NextEditCompletionFeaturesState">
     <decayedCancelled>
-      <entry key="MS100" value="1.0066158806232204" />
-      <entry key="MS500" value="1.449710193392015" />
-      <entry key="S2" value="3.354561170893809" />
-      <entry key="S5" value="6.714028080013292" />
-      <entry key="S10" value="10.391931556748357" />
-      <entry key="S30" value="15.235767388660358" />
-      <entry key="S60" value="16.97249778953003" />
-      <entry key="M2" value="18.00336929687056" />
-      <entry key="M5" value="21.700094311058034" />
-      <entry key="M10" value="35.697363927690375" />
-      <entry key="M15" value="52.85825081998764" />
-      <entry key="M30" value="93.09104199816683" />
-      <entry key="H1" value="131.6337844367086" />
-      <entry key="H2" value="158.73046001396858" />
-      <entry key="H4" value="174.85576989036593" />
-      <entry key="D1" value="189.82499177750358" />
-      <entry key="W1" value="192.54258096103558" />
+      <entry key="MS100" value="1.3425145511781598" />
+      <entry key="MS500" value="4.124864677998401" />
+      <entry key="S2" value="11.666219869823912" />
+      <entry key="S5" value="23.084311888027703" />
+      <entry key="S10" value="39.6747227205614" />
+      <entry key="S30" value="93.66979992904248" />
+      <entry key="S60" value="133.74350564711924" />
+      <entry key="M2" value="168.26045917639652" />
+      <entry key="M5" value="277.5357434179069" />
+      <entry key="M10" value="476.02971645225006" />
+      <entry key="M15" value="624.6505150034244" />
+      <entry key="M30" value="914.6004990831512" />
+      <entry key="H1" value="1251.6207151207466" />
+      <entry key="H2" value="1640.0857450419865" />
+      <entry key="H4" value="2033.5970513799787" />
+      <entry key="D1" value="3237.312327565646" />
+      <entry key="W1" value="3926.8379276131095" />
     </decayedCancelled>
     <decayedSelected>
       <entry key="MS100" value="0.0" />
@@ -109,23 +112,23 @@
       <entry key="W1" value="0.0" />
     </decayedSelected>
     <decayedShown>
-      <entry key="MS100" value="0.38870641233760156" />
-      <entry key="MS500" value="1.2418795329223924" />
-      <entry key="S2" value="3.202064358742141" />
-      <entry key="S5" value="6.580488488628564" />
-      <entry key="S10" value="10.296289119692206" />
-      <entry key="S30" value="15.193409858071048" />
-      <entry key="S60" value="16.949598941930486" />
-      <entry key="M2" value="17.9914472813435" />
-      <entry key="M5" value="21.695149306960246" />
-      <entry key="M10" value="35.694731587553335" />
-      <entry key="M15" value="52.85637021827892" />
-      <entry key="M30" value="93.08995300459176" />
-      <entry key="H1" value="131.63316800448266" />
-      <entry key="H2" value="158.73012637115258" />
-      <entry key="H4" value="174.85559548179944" />
-      <entry key="D1" value="189.82496153349067" />
-      <entry key="W1" value="192.54257660993673" />
+      <entry key="MS100" value="0.9179596573537298" />
+      <entry key="MS500" value="3.9011871484722804" />
+      <entry key="S2" value="11.492839699233318" />
+      <entry key="S5" value="22.944463375719582" />
+      <entry key="S10" value="39.55427830921589" />
+      <entry key="S30" value="93.57426697256672" />
+      <entry key="S60" value="133.67465580836827" />
+      <entry key="M2" value="168.21688510990194" />
+      <entry key="M5" value="277.50824208371324" />
+      <entry key="M10" value="476.00824176719084" />
+      <entry key="M15" value="624.6328819974175" />
+      <entry key="M30" value="914.5891568757486" />
+      <entry key="H1" value="1251.6140406794505" />
+      <entry key="H2" value="1640.081994442118" />
+      <entry key="H4" value="2033.5950003227074" />
+      <entry key="D1" value="3237.311890903367" />
+      <entry key="W1" value="3926.8378569345696" />
     </decayedShown>
   </component>
   <component name="ProjectColorInfo">{

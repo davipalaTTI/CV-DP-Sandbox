@@ -1,10 +1,12 @@
 import copy
 import cv2
+import math
 import time
 import signal
 import logging
 import threading
 import numpy as np
+import psutil
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -19,7 +21,12 @@ from core.training_mode import TrainingModeCapture, TrainingConfig
 from utils.results_export import ResultsExporter, ExportConfig, get_master_log_writer
 
 from .stats import ProcessingStats
-from .async_io import AsyncCameraReader, AsyncVideoWriter, ThreadedDetectionEngine
+from .async_io import (
+    AsyncCameraReader,
+    AsyncVideoWriter,
+    ThreadedDetectionEngine,
+    put_latest,
+)
 from .visualizer import Visualizer
 from .interaction_handler import InteractionHandler
 from ..visualizer_heatmap import HeatmapAccumulator
@@ -48,9 +55,36 @@ class CameraRunner:
         self.show_stats = True
         self.show_controls = True
         self.ui_minimized = False
-        self.live_window_name = "Live Object Counter"
-        self.status_window_name = "Live Counter Status"
-        self.live_view_enabled = bool(getattr(config, 'show_live_video', True))
+        self.headless = bool(getattr(config, 'runtime_headless', False))
+        self.live_view_enabled = (
+            bool(getattr(config, 'show_live_video', True)) and not self.headless
+        )
+        self.stop_at = getattr(config, 'runtime_stop_at', None)
+        self.source_name = str(getattr(config, 'source_name', '') or 'LIVE CAMERA')
+        self.window_index = max(0, int(getattr(config, 'runtime_window_index', 0)))
+        self.window_count = max(1, int(getattr(config, 'runtime_window_count', 1)))
+        self.camera_stall_timeout = max(
+            5.0, float(getattr(config, 'camera_stall_timeout_seconds', 20.0))
+        )
+        self.inference_stall_timeout = max(
+            15.0, float(getattr(config, 'inference_stall_timeout_seconds', 120.0))
+        )
+        self.performance_log_interval = max(
+            5.0, float(getattr(config, 'performance_log_interval_seconds', 30.0))
+        )
+        self.video_writer_queue_size = max(
+            2, min(32, int(getattr(config, 'video_writer_queue_size', 8)))
+        )
+        self.video_writer_stall_timeout = max(
+            10.0,
+            float(getattr(config, 'video_writer_stall_timeout_seconds', 30.0)),
+        )
+        self.max_consecutive_detection_errors = max(
+            1, int(getattr(config, 'max_consecutive_detection_errors', 30))
+        )
+        window_source = self.source_name.strip()[:80] or "LIVE CAMERA"
+        self.live_window_name = f"Live Object Counter - {window_source}"
+        self.status_window_name = f"Live Counter Status - {window_source}"
         self._live_window_created = False
         self._status_window_created = False
         self._last_status_draw_time = 0.0
@@ -138,6 +172,8 @@ class CameraRunner:
         # Signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, self._signal_handler)
 
     # --- SETUP & INITIALIZATION ---
     def _create_configured_counter(self, frame_size: Tuple[int, int]) -> ObjectCounter:
@@ -170,13 +206,25 @@ class CameraRunner:
             # CAP_FFMPEG is preferred for RTSP when OpenCV was built with FFmpeg support;
             # local webcams keep the default backend.
             if is_rtsp:
-                self.cap = cv2.VideoCapture(str(source), cv2.CAP_FFMPEG)
+                timeout_ms = max(1000, int(self.camera_stall_timeout * 500))
+                params = [
+                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                    min(timeout_ms, 10000),
+                    cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+                    timeout_ms,
+                ]
+                try:
+                    self.cap = cv2.VideoCapture(
+                        str(source), cv2.CAP_FFMPEG, params
+                    )
+                except (cv2.error, TypeError):
+                    self.cap = cv2.VideoCapture(str(source), cv2.CAP_FFMPEG)
             else:
                 self.cap = cv2.VideoCapture(source)
 
             if not self.cap.isOpened():
                 source_type = "RTSP stream" if is_rtsp else "camera"
-                self.logger.error(f"Failed to open {source_type}: {source}")
+                self.logger.error("Failed to open %s", source_type)
                 return False
 
             # Width/FPS setters are useful for local webcams, but RTSP stream dimensions
@@ -230,7 +278,9 @@ class CameraRunner:
             vw = cv2.VideoWriter(str(output_path), fourcc, export_fps, (w, h))
 
             if vw.isOpened():
-                self.video_writer = AsyncVideoWriter(vw)
+                self.video_writer = AsyncVideoWriter(
+                    vw, queue_size=self.video_writer_queue_size
+                )
                 self._video_writer_size = (w, h)
                 self.logger.info(f"Video writer initialized successfully at: {output_path}")
                 return True
@@ -251,14 +301,15 @@ class CameraRunner:
             raise RuntimeError("Failed to initialize camera")
 
         # Initialize Zero-Copy Queues
-        self.camera_to_engine_queue = ThreadQueue(maxsize=3)
-        self.engine_to_analytics_queue = ThreadQueue(maxsize=3)
+        self.camera_to_engine_queue = ThreadQueue(maxsize=1)
+        self.engine_to_analytics_queue = ThreadQueue(maxsize=1)
 
         # Start the YOLO Background Thread
         self.threaded_engine = ThreadedDetectionEngine(
             engine=self.detection_engine,
             input_queue=self.camera_to_engine_queue,
-            output_queue=self.engine_to_analytics_queue
+            output_queue=self.engine_to_analytics_queue,
+            max_consecutive_errors=self.max_consecutive_detection_errors,
         )
 
         if self.config.save_video:
@@ -268,35 +319,55 @@ class CameraRunner:
         self.stats.start_time = time.time()
 
         first_frame = True
+        last_submitted_sequence = -1
+        self._input_frames_dropped = 0
+        self._performance_last_at = time.monotonic()
+        self._performance_last_capture_count = self.cap.frames_read
+        self._performance_last_inference_count = 0
+        self._performance_last_input_drops = 0
+        self._performance_process = psutil.Process()
 
         try:
             while self.is_running and not self.stop_requested:
-                # --- CAMERA PRODUCER ---
-                # Only read/copy a camera frame when the YOLO queue has room.
-                # AsyncCameraReader.read() returns a copy, so reading while the queue
-                # is full wastes CPU on frames that will be discarded anyway.
-                if not self.camera_to_engine_queue.full():
-                    ret, raw_frame = self.cap.read()
-                    if ret:
-                        self.camera_to_engine_queue.put(raw_frame)
+                if self.stop_at is not None and datetime.now() >= self.stop_at:
+                    self.logger.info(f"Scheduled stop reached: {self.stop_at.isoformat()}")
+                    break
 
-                        if first_frame:
-                            h, w = raw_frame.shape[:2]
+                self._check_pipeline_health()
 
-                            # Build the counter/exclusion math from the actual camera frame size.
-                            actual_size = (w, h)
-                            if self.counter.frame_size != actual_size:
-                                self.counter.set_frame_size(actual_size)
+                # Submit each captured frame at most once. If inference is busy,
+                # replace its one queued frame with the newest camera frame.
+                ret, raw_frame, sequence = self.cap.read_latest(
+                    last_submitted_sequence, copy_frame=False
+                )
+                if ret and raw_frame is not None:
+                    if last_submitted_sequence >= 0 and sequence > last_submitted_sequence + 1:
+                        self._input_frames_dropped += (
+                            sequence - last_submitted_sequence - 1
+                        )
+                    if put_latest(self.camera_to_engine_queue, raw_frame):
+                        self._input_frames_dropped += 1
+                    last_submitted_sequence = sequence
 
-                            if getattr(self.config, 'exclusion_zones', None):
-                                self.detection_engine.set_exclusion_zones(self.config.exclusion_zones, raw_frame.shape)
+                    if first_frame:
+                        h, w = raw_frame.shape[:2]
 
-                            if self.live_view_enabled:
-                                self._ensure_live_window(w, h)
-                            else:
-                                self._ensure_status_window()
+                        # Build the counter/exclusion math from the actual camera frame size.
+                        actual_size = (w, h)
+                        if self.counter.frame_size != actual_size:
+                            self.counter.set_frame_size(actual_size)
 
-                            first_frame = False
+                        if getattr(self.config, 'exclusion_zones', None):
+                            self.detection_engine.set_exclusion_zones(self.config.exclusion_zones, raw_frame.shape)
+
+                        if self.headless:
+                            pass
+                        elif self.live_view_enabled:
+                            self._ensure_live_window(w, h)
+                        else:
+                            self._ensure_status_window()
+
+                        first_frame = False
 
                 # 2. Process Detections
                 try:
@@ -312,7 +383,7 @@ class CameraRunner:
                         segment_id = f"hour_{self.current_segment_start_dt.hour:02d}"
                         self.exporter.queue_api_events(
                             events,
-                            video_source="LIVE CAMERA",
+                            video_source=self.source_name,
                             segment_id=segment_id
                         )
 
@@ -345,8 +416,11 @@ class CameraRunner:
 
                     self._trigger_live_export(force=False)
                     self._update_stats(len(events) if events else 0)
+                    self._log_pipeline_performance()
 
-                    if self.live_view_enabled:
+                    if self.headless:
+                        pass
+                    elif self.live_view_enabled:
                         self._ensure_live_window(processed_frame.shape[1], processed_frame.shape[0])
                         cv2.imshow(self.live_window_name, display_frame)
                     else:
@@ -354,17 +428,20 @@ class CameraRunner:
                         self._show_status_window()
 
                 except Empty:
-                    if self.live_view_enabled:
+                    if self.headless:
+                        time.sleep(0.001)
+                    elif self.live_view_enabled:
                         self._ensure_live_window()
                     else:
                         self._ensure_status_window()
                         self._show_status_window()
 
                 # 3. Handle UI Inputs
-                key_raw = cv2.waitKey(1)
-                key = -1 if key_raw == -1 else (key_raw & 0xFF)
-                if not self.interaction_handler.handle_keyboard_input(key):
-                    break
+                if not self.headless:
+                    key_raw = cv2.waitKey(1)
+                    key = -1 if key_raw == -1 else (key_raw & 0xFF)
+                    if not self.interaction_handler.handle_keyboard_input(key):
+                        break
 
         except KeyboardInterrupt:
             self.logger.info("Processing interrupted by user")
@@ -374,6 +451,86 @@ class CameraRunner:
             self.cleanup()
 
         return self._get_final_results()
+
+    def _check_pipeline_health(self) -> None:
+        if not self.cap.running:
+            raise RuntimeError(
+                f"Camera stream disconnected: {self.cap.last_error or 'read stopped'}"
+            )
+
+        camera_idle = self.cap.seconds_since_last_frame()
+        if camera_idle >= self.camera_stall_timeout:
+            raise RuntimeError(
+                f"Camera produced no new frame for {camera_idle:.1f} seconds"
+            )
+
+        fatal_error = self.threaded_engine.fatal_error
+        if fatal_error is not None:
+            raise RuntimeError(f"Detection worker failed: {fatal_error}") from fatal_error
+
+        inference_started_at = self.threaded_engine.inference_started_at
+        if inference_started_at is not None:
+            inference_age = time.monotonic() - inference_started_at
+            if inference_age >= self.inference_stall_timeout:
+                raise RuntimeError(
+                    f"Inference did not complete for {inference_age:.1f} seconds"
+                )
+
+        if not self.threaded_engine.thread.is_alive() and self.threaded_engine.running:
+            raise RuntimeError("Detection worker stopped unexpectedly")
+
+        video_writer = getattr(self, "video_writer", None)
+        if video_writer is not None:
+            if video_writer.last_error is not None:
+                raise RuntimeError(
+                    f"Video writer failed: {video_writer.last_error}"
+                ) from video_writer.last_error
+            write_started_at = video_writer.write_started_at
+            if write_started_at is not None:
+                write_age = time.monotonic() - write_started_at
+                if write_age >= self.video_writer_stall_timeout:
+                    raise RuntimeError(
+                        f"Video writer blocked for {write_age:.1f} seconds"
+                    )
+
+    def _log_pipeline_performance(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._performance_last_at
+        if elapsed < self.performance_log_interval:
+            return
+
+        capture_count = self.cap.frames_read
+        inference_count = self.threaded_engine.frames_processed
+        capture_fps = (
+            capture_count - self._performance_last_capture_count
+        ) / elapsed
+        inference_fps = (
+            inference_count - self._performance_last_inference_count
+        ) / elapsed
+        new_input_drops = self._input_frames_dropped - self._performance_last_input_drops
+        writer_drops = (
+            self.video_writer.dropped_frames if self.video_writer is not None else 0
+        )
+        writer_depth = (
+            self.video_writer.frame_queue.qsize() if self.video_writer is not None else 0
+        )
+        rss_mb = self._performance_process.memory_info().rss / (1024 * 1024)
+        self.logger.info(
+            "Performance: capture=%.1f FPS, inference=%.1f FPS, analytics=%.1f FPS, "
+            "stale_input_drops=%d, writer_queue=%d/%d, writer_drops=%d, rss=%.0f MB",
+            capture_fps,
+            inference_fps,
+            self.stats.fps,
+            new_input_drops,
+            writer_depth,
+            self.video_writer_queue_size,
+            writer_drops,
+            rss_mb,
+        )
+        self._performance_last_at = now
+        self._performance_last_capture_count = capture_count
+        self._performance_last_inference_count = inference_count
+        self._performance_last_input_drops = self._input_frames_dropped
 
     def _ensure_live_window(self, w: Optional[int] = None, h: Optional[int] = None) -> None:
         if self._status_window_created:
@@ -400,7 +557,7 @@ class CameraRunner:
 
         if not self._status_window_created:
             cv2.namedWindow(self.status_window_name, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self.status_window_name, 460, 180)
+            self.fit_center(self.status_window_name, 460, 180, frac=0.9)
             self._status_window_created = True
 
     def _show_status_window(self) -> None:
@@ -528,7 +685,7 @@ class CameraRunner:
                     counts=counts_dict,
                     events=events_dict,
                     stats=enhanced_stats,
-                    video_source="LIVE CAMERA"
+                    video_source=self.source_name
                 )
             finally:
                 self.exporter.config.enable_master_log = original_master_setting
@@ -538,7 +695,8 @@ class CameraRunner:
     def _rotate_hourly_video(self, window_start: datetime, window_end: datetime):
         try:
             if self.video_writer and self.video_writer.isOpened():
-                self.video_writer.release()
+                if not self.video_writer.release():
+                    raise RuntimeError("Previous video writer could not be stopped")
                 self.video_writer = None
             if self.config.save_video:
                 date_str = window_end.strftime("%Y%m%d")
@@ -547,6 +705,7 @@ class CameraRunner:
                 self._initialize_video_writer(filename)
         except Exception as e:
             self.logger.error(f"Failed to rotate hourly video: {e}")
+            raise
 
     def _finalize_current_segment(self) -> None:
         try:
@@ -589,7 +748,8 @@ class CameraRunner:
                     segment_id=self.current_segment,
                     counts=counts_dict,
                     events=events_dict,
-                    stats=enhanced_stats
+                    stats=enhanced_stats,
+                    video_source=self.source_name,
                 )
             finally:
                 self.exporter.config.enable_master_log = original_master_setting
@@ -648,7 +808,8 @@ class CameraRunner:
                 self.cap.release()
             if self.video_writer:
                 self.video_writer.release()
-            cv2.destroyAllWindows()
+            if not self.headless:
+                cv2.destroyAllWindows()
             self.logger.info("Camera runner cleanup completed")
         except Exception as e:
             self.logger.warning(f"Cleanup error: {e}")
@@ -659,9 +820,26 @@ class CameraRunner:
         sw, sh = r.winfo_screenwidth(), r.winfo_screenheight()
         if sw > 3000 or sh > 2000:
             sw, sh = 1920, 1080
-        s = min((sw * frac) / w, (sh * frac) / h, 1.0)
-        nw, nh = int(w * s), int(h * s)
-        x, y = max(0, (sw - nw) // 2), max(0, (sh - nh) // 2)
+        if self.window_count > 1:
+            columns = math.ceil(math.sqrt(self.window_count))
+            rows = math.ceil(self.window_count / columns)
+            cell_width = sw / columns
+            cell_height = sh / rows
+            slot = self.window_index % self.window_count
+            column = slot % columns
+            row = slot // columns
+            s = min(
+                (cell_width * frac) / w,
+                (cell_height * frac) / h,
+                1.0,
+            )
+            nw, nh = max(1, int(w * s)), max(1, int(h * s))
+            x = int(column * cell_width + (cell_width - nw) / 2)
+            y = int(row * cell_height + (cell_height - nh) / 2)
+        else:
+            s = min((sw * frac) / w, (sh * frac) / h, 1.0)
+            nw, nh = int(w * s), int(h * s)
+            x, y = max(0, (sw - nw) // 2), max(0, (sh - nh) // 2)
         cv2.namedWindow(name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(name, nw, nh)
         cv2.moveWindow(name, x, y)
@@ -687,7 +865,7 @@ class CameraRunner:
             current_total = len(all_events)
 
             segment_id = f"hour_{self.current_segment_start_dt.hour:02d}"
-            video_name = "LIVE CAMERA"
+            video_name = self.source_name
 
             if current_total > self.last_exported_event_count:
                 new_events_slice = all_events[self.last_exported_event_count:]

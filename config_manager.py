@@ -20,6 +20,13 @@ class InputType(Enum):
     VIDEO = "video"
     RTSP = "rtsp"
 
+
+@dataclass(frozen=True)
+class DeploymentRequest:
+    """Startup selection that delegates processing to a deployment manifest."""
+
+    manifest_path: str
+
 @dataclass
 class CountingLine:
     """Configuration for a counting line"""
@@ -78,6 +85,13 @@ class AppConfig:
     frame_skip: int = 1  # Process every Nth frame (1 = no skip)
     interpolate_tracks: bool = True  # Interpolate positions for skipped frames
     show_live_video: bool = True  # Camera mode: start with full annotated video view enabled by default
+    source_name: str = ""  # Stable camera/source identifier used in exports
+    camera_stall_timeout_seconds: float = 20.0
+    inference_stall_timeout_seconds: float = 120.0
+    max_consecutive_detection_errors: int = 30
+    performance_log_interval_seconds: float = 30.0
+    video_writer_queue_size: int = 8
+    video_writer_stall_timeout_seconds: float = 30.0
 
     # --- Heatmap options ---
     enable_heatmap: bool = False

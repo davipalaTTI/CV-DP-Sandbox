@@ -66,6 +66,9 @@ class DetectionEngine:
         # cuDNN/CUDA transients don't flood the console.
         self._error_counts: Dict[str, int] = {}
         self._error_log_threshold = 3  # log first N occurrences, then summarize every 500
+        self.last_detection_error = None
+        self.consecutive_detection_errors = 0
+        self._warmed_up = False
 
         # Serializes GPU inference and engine-state mutations across worker threads.
         # Why: Ultralytics + TensorRT uses CUDA Graph capture; concurrent calls from
@@ -190,9 +193,16 @@ class DetectionEngine:
                 # use GPU 0 by default
                 self.inference_device = 0
                 self.device = "cuda:0"
+                self.use_half = True
+                try:
+                    torch.backends.cudnn.benchmark = True
+                    torch.set_float32_matmul_precision("high")
+                except Exception:
+                    pass
             else:
                 self.inference_device = device_str
                 self.device = device_str
+                self.use_half = False
 
             # If it's a PyTorch model (.pt), try to physically move it to device.
             #    For ONNX, we SKIP .to() and let 'device' in track() control backend.
@@ -252,7 +262,7 @@ class DetectionEngine:
                 'conf': self.confidence_threshold,
                 'tracker': self.tracker_config if self.tracker_config else 'bytetrack.yaml',
                 # --- The Jetson Orin Nano Speed Flags ---
-                'half': True,           # Prevents slow CPU->GPU FP32 casting
+                'half': self.use_half,  # FP16 on CUDA; CPU remains on its faster FP32 path
                 'verbose': False,       # Stops console print-spam from blocking the UI thread
                 'imgsz': self.imgsz,    # Matches the model's exported input shape
             }
@@ -287,9 +297,14 @@ class DetectionEngine:
 
             # Parse vectorized, outside the lock. One bulk GPU->CPU transfer
             # for the whole batch instead of N per-box .cpu() calls.
-            return self._parse_results(results, frame.shape)
+            parsed = self._parse_results(results, frame.shape)
+            self.last_detection_error = None
+            self.consecutive_detection_errors = 0
+            return parsed
 
         except Exception as e:
+            self.last_detection_error = e
+            self.consecutive_detection_errors += 1
             self._log_detection_error(e)
             return []
 
@@ -445,12 +460,15 @@ class DetectionEngine:
             frame_size: (width, height) for dummy frame. Defaults to the model's
                 expected input size so the warmup actually exercises the engine.
         """
+        if self._warmed_up:
+            return
         try:
             if frame_size is None:
                 size = getattr(self, "imgsz", 640)
                 frame_size = (size, size)
             dummy_frame = np.zeros((frame_size[1], frame_size[0], 3), dtype=np.uint8)
             _ = self.detect_and_track(dummy_frame)
+            self._warmed_up = True
             self.logger.info("Model warmup completed")
         except Exception as e:
             self.logger.warning(f"Model warmup failed: {e}")

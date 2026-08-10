@@ -14,10 +14,10 @@ from tkinter import messagebox, simpledialog
 from typing import List, Tuple, Dict, Optional
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 import tkinter as tk
 
 from config_manager import AppConfig, CountingLine, CountingZone, ExclusionZone
+from utils.video_utils import load_source_preview
 
 
 @dataclass
@@ -42,7 +42,13 @@ class GUIState:
 class InteractiveGUI:
     """Interactive GUI for setting up counting lines and zones"""
 
-    def __init__(self, config: AppConfig, class_names: Dict[int, str]):
+    def __init__(
+        self,
+        config: AppConfig,
+        class_names: Dict[int, str],
+        preview_frame: Optional[np.ndarray] = None,
+        dialog_parent: Optional[tk.Misc] = None,
+    ):
         self.config = config
         self.class_names = class_names
         self.logger = logging.getLogger(__name__)
@@ -54,6 +60,7 @@ class InteractiveGUI:
         # GUI state
         self.state = GUIState()
         self.scale_factor = 1.0
+        self._pending_actions: List[str] = []
 
         # Configuration storage
         self.lines_config = []
@@ -63,18 +70,30 @@ class InteractiveGUI:
         # UI elements
         self.buttons = self._define_buttons()
         self.preview_frame = None
+        self._initial_preview_frame = (
+            preview_frame.copy() if preview_frame is not None else None
+        )
         self.original_frame_size = None
 
-        # DON'T create dialog_root here - create it when needed
-        self.dialog_root = None
+        self.dialog_root = dialog_parent
+        self._owns_dialog_root = False
+        self._dialog_parent_state = None
+        self._dialog_parent_topmost = None
 
         self.logger.info("InteractiveGUI initialized")
 
-    def _ensure_dialog_root(self) -> tk.Tk:
-        if self.dialog_root is None or not self.dialog_root.winfo_exists():
+    def _ensure_dialog_root(self) -> tk.Misc:
+        try:
+            if self.dialog_root is not None and self.dialog_root.winfo_exists():
+                return self.dialog_root
+        except tk.TclError:
+            self.dialog_root = None
+
+        if self.dialog_root is None:
             self.dialog_root = tk.Tk()
             self.dialog_root.withdraw()
             self.dialog_root.attributes('-topmost', True)
+            self._owns_dialog_root = True
         return self.dialog_root
 
     def _define_buttons(self) -> Dict[str, Dict]:
@@ -157,42 +176,18 @@ class InteractiveGUI:
         finally:
             self._cleanup()
 
-    # Supported video extensions
-    VIDEO_EXTENSIONS = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv', '*.flv', 
-                        '*.MP4', '*.AVI', '*.MOV', '*.MKV', '*.WMV', '*.FLV']
-
     def _load_preview_frame(self) -> bool:
         """Load the first frame for preview"""
         try:
-            if self.config.is_camera:
-                cap = cv2.VideoCapture(self.config.input_source)
+            if self._initial_preview_frame is not None:
+                frame = self._initial_preview_frame
+                self._initial_preview_frame = None
             else:
-                # Find first video file
-                if self.config.input_type.value == "folder":
-                    video_files = []
-                    folder_path = Path(self.config.input_source)
-                    for ext in self.VIDEO_EXTENSIONS:
-                        video_files.extend(folder_path.glob(ext))
-                    video_files.sort(key=lambda x: x.name)  # Sort by name for consistency
-                    if not video_files:
-                        self.logger.error("No video files found in input folder")
-                        return False
-                    video_path = str(video_files[0])
-                else:  # single video file
-                    video_path = self.config.input_source
-
-                cap = cv2.VideoCapture(video_path)
-
-            if not cap.isOpened():
-                self.logger.error("Failed to open video source")
-                return False
-
-            ret, frame = cap.read()
-            cap.release()
-
-            if not ret:
-                self.logger.error("Failed to read first frame")
-                return False
+                preview = load_source_preview(self.config)
+                if preview.frame is None:
+                    self.logger.error("Failed to load preview frame: %s", preview.error)
+                    return False
+                frame = preview.frame
 
             # Store original frame size
             self.original_frame_size = (frame.shape[1], frame.shape[0])  # (width, height)
@@ -219,6 +214,7 @@ class InteractiveGUI:
     def _run_interactive_loop(self):
         """Run the main interactive loop"""
         window_name = "Setup - Draw Lines and Zones"
+        self._hide_external_dialog_parent()
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)  # Changed from AUTOSIZE to NORMAL
 
         # Force it to match the preview frame size before centering
@@ -242,6 +238,7 @@ class InteractiveGUI:
 
             # Handle keyboard input
             key = cv2.waitKey(1) & 0xFF
+            self._process_pending_actions()
             if key == 27:  # ESC key
                 if messagebox.askyesno("Exit", "Are you sure you want to exit setup?", parent=self._ensure_dialog_root()):
                     break
@@ -254,6 +251,64 @@ class InteractiveGUI:
                 self._undo_last_element()
 
         cv2.destroyAllWindows()
+
+    def _hide_external_dialog_parent(self) -> None:
+        """Keep the deployment editor hidden while OpenCV setup is active."""
+        if self.dialog_root is None or self._owns_dialog_root:
+            return
+        try:
+            self._dialog_parent_state = self.dialog_root.state()
+            self._dialog_parent_topmost = self.dialog_root.attributes("-topmost")
+            self.dialog_root.attributes("-topmost", True)
+            self.dialog_root.withdraw()
+            self.dialog_root.update_idletasks()
+        except tk.TclError:
+            self._dialog_parent_state = None
+
+    def _restore_external_dialog_parent(self) -> None:
+        if self.dialog_root is None or self._dialog_parent_state is None:
+            return
+        try:
+            original_state = self._dialog_parent_state
+            if original_state != "withdrawn":
+                self.dialog_root.deiconify()
+                if original_state == "zoomed":
+                    self.dialog_root.state("zoomed")
+                elif original_state == "iconic":
+                    self.dialog_root.iconify()
+                else:
+                    self.dialog_root.lift()
+            if self._dialog_parent_topmost is not None:
+                self.dialog_root.attributes(
+                    "-topmost", self._dialog_parent_topmost
+                )
+            self.dialog_root.update_idletasks()
+        except tk.TclError:
+            pass
+        finally:
+            self._dialog_parent_state = None
+            self._dialog_parent_topmost = None
+
+    def _queue_action(self, action: str) -> None:
+        """Queue UI work so it never runs inside an OpenCV mouse callback."""
+        if action not in self._pending_actions:
+            self._pending_actions.append(action)
+
+    def _process_pending_actions(self) -> None:
+        """Run one queued modal action after cv2.waitKey has returned."""
+        if not self._pending_actions:
+            return
+
+        action = self._pending_actions.pop(0)
+        handlers = {
+            "save_line": self._save_current_line,
+            "finish_zone": self._finish_current_zone,
+            "confirm": self._confirm_setup,
+            "reference_length": self._finalize_reference_length,
+        }
+        handler = handlers.get(action)
+        if handler is not None:
+            handler()
 
     def _mouse_callback(self, event, x, y, flags, param):
         """Handle mouse events"""
@@ -290,10 +345,10 @@ class InteractiveGUI:
             self.state.current_zone.clear()
 
         elif button_name == "finish_zone" and self.config.enable_zones:
-            self._finish_current_zone()
+            self._queue_action("finish_zone")
 
         elif button_name == "confirm":
-            self._confirm_setup()
+            self._queue_action("confirm")
 
         elif button_name == "ref":
             self.state.selection_mode = "ref"
@@ -315,8 +370,7 @@ class InteractiveGUI:
             self.state.current_line.append((x, y))
             self.logger.info(f"Added second point: ({x}, {y}), completing line")
 
-            # Save the line (this should trigger the dialog)
-            self._save_current_line()
+            self._queue_action("save_line")
 
         else:
             # This shouldn't happen, but let's handle it
@@ -423,32 +477,24 @@ class InteractiveGUI:
         """Ask user for line properties"""
         try:
             self.logger.info("Asking for line properties...")
-
-            # Create a temporary root just for this dialog
-            temp_root = tk.Tk()
-            temp_root.withdraw()  # Hide it
-            temp_root.attributes('-topmost', True)
+            dialog_parent = self._ensure_dialog_root()
 
             # Get line name using simple dialog
             name = simpledialog.askstring(
                 "Line Name",
                 "Enter a name for this line:",
-                parent=temp_root
+                parent=dialog_parent,
             )
 
             if not name:
-                temp_root.destroy()
                 self.logger.info("No name provided, cancelling line creation")
                 return None
 
             self.logger.info(f"Got line name: {name}")
 
             # Create dialog for class selection and direction
-            dialog = LinePropertiesDialog(temp_root, self.config, self.class_names)
+            dialog = LinePropertiesDialog(dialog_parent, self.config, self.class_names)
             result = dialog.show()
-
-            # Clean up temp root
-            temp_root.destroy()
 
             if result:
                 result["name"] = name
@@ -461,44 +507,28 @@ class InteractiveGUI:
             self.logger.error(f"Error getting line properties: {e}")
             return None
 
-        except Exception as e:
-            self.logger.error(f"Error getting line properties: {e}")
-            return None
-
-        except Exception as e:
-            self.logger.error(f"Error getting line properties: {e}")
-            return None
-
     def _ask_zone_properties(self) -> Optional[Dict]:
         """Ask user for zone properties"""
         try:
             self.logger.info("Asking for zone properties...")
-
-            # Create a temporary root just for this dialog
-            temp_root = tk.Tk()
-            temp_root.withdraw()  # Hide it
-            temp_root.attributes('-topmost', True)
+            dialog_parent = self._ensure_dialog_root()
 
             # Get zone name
             name = simpledialog.askstring(
                 "Zone Name",
                 "Enter a name for this zone:",
-                parent=temp_root
+                parent=dialog_parent,
             )
 
             if not name:
-                temp_root.destroy()
                 self.logger.info("No name provided, cancelling zone creation")
                 return None
 
             self.logger.info(f"Got zone name: {name}")
 
             # Create dialog for class selection
-            dialog = ZonePropertiesDialog(temp_root, self.class_names)
+            dialog = ZonePropertiesDialog(dialog_parent, self.class_names)
             result = dialog.show()
-
-            # Clean up temp root
-            temp_root.destroy()
 
             if result:
                 result["name"] = name
@@ -513,9 +543,12 @@ class InteractiveGUI:
 
     def _confirm_setup(self):
         """Confirm the current setup"""
-        if not self.lines_config:
-            messagebox.showwarning("No Lines", "Please add at least one counting line before confirming.",
-                                   parent=self._ensure_dialog_root())
+        if not self.lines_config and not self.zones_config:
+            messagebox.showwarning(
+                "No Counting Geometry",
+                "Please add at least one counting line or zone before confirming.",
+                parent=self._ensure_dialog_root(),
+            )
             return
 
         # Show summary
@@ -845,16 +878,22 @@ class InteractiveGUI:
         """Clean up resources"""
         try:
             cv2.destroyAllWindows()
-            if self.dialog_root:
+        except cv2.error:
+            pass
+
+        self._restore_external_dialog_parent()
+        try:
+            if self.dialog_root and self._owns_dialog_root:
                 self.dialog_root.destroy()
-        except:
+                self.dialog_root = None
+        except tk.TclError:
             pass
 
     def _handle_ref_click(self, x: int, y: int):
         # two points define the pixel length
         self.state.current_ref.append((x, y))
         if len(self.state.current_ref) == 2:
-            self._finalize_reference_length()
+            self._queue_action("reference_length")
 
     def _finalize_reference_length(self):
         try:
@@ -922,12 +961,9 @@ class InteractiveGUI:
         """Center an OpenCV window on the primary screen."""
         try:
             h, w = self.preview_frame.shape[:2]
-
-            root = tk.Tk()
-            root.withdraw()
+            root = self._ensure_dialog_root()
             screen_w = root.winfo_screenwidth()
             screen_h = root.winfo_screenheight()
-            root.destroy()
 
             # --- HEADLESS SAFETY ---
             if screen_w > 3000 or screen_h > 2000:

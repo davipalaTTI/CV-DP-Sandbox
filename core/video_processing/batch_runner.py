@@ -44,6 +44,8 @@ class BatchRunner:
             try:
                 signal.signal(signal.SIGINT, self._signal_handler)
                 signal.signal(signal.SIGTERM, self._signal_handler)
+                if hasattr(signal, "SIGBREAK"):
+                    signal.signal(signal.SIGBREAK, self._signal_handler)
             except (ValueError, OSError) as e:
                 self.logger.debug(f"Could not register signal handlers: {e}")
         else:

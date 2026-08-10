@@ -417,9 +417,10 @@ class ApiBatchUploader:
     into a fresh list while the sealed batch uploads on a separate thread.
     """
 
-    def __init__(self, interval_seconds: int = 300):
+    def __init__(self, interval_seconds: int = 300, max_retry_batches: int = 24):
         self.logger = logging.getLogger(__name__ + ".api_uploader")
         self.interval_seconds = interval_seconds
+        self.max_retry_batches = max(1, int(max_retry_batches))
 
         self._api_url = None
         self._api_key = None
@@ -577,10 +578,7 @@ class ApiBatchUploader:
                     if self._finalizing:
                         self._persist_failed_batch(item, "final upload failed")
                     else:
-                        # Keep the sealed batch intact so a retry uses the same
-                        # idempotency key and cannot be mixed with new events.
-                        with self._pending_lock:
-                            self._retry_batches.append(item)
+                        self._retain_retry_batch(item)
                         self.logger.warning(
                             f"API batch {item.batch_id[:8]} will retry at the next "
                             f"upload boundary."
@@ -591,6 +589,19 @@ class ApiBatchUploader:
                     self._persist_failed_batch(item, f"unexpected uploader error: {exc}")
             finally:
                 self._upload_queue.task_done()
+
+    def _retain_retry_batch(self, batch: ApiUploadBatch) -> None:
+        """Keep a bounded retry backlog and persist overflow instead of leaking memory."""
+        overflow_batches = []
+        with self._pending_lock:
+            self._retry_batches.append(batch)
+            while len(self._retry_batches) > self.max_retry_batches:
+                overflow_batches.append(self._retry_batches.pop(0))
+        for overflow_batch in overflow_batches:
+            self._persist_failed_batch(
+                overflow_batch,
+                "retry backlog exceeded in-memory limit",
+            )
 
     def _prepare_payload(self, event_list: List[Dict]):
         """Return (valid_payload, rejected_events). Invalid track IDs are excluded."""

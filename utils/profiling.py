@@ -35,13 +35,13 @@ class PerformanceTimer:
         """Get duration in seconds"""
         return self.end_time - self.start_time
 
-def run_with_profiling(main_func, config_file=None, skip_gui=False):
+def run_with_profiling(main_func, **main_kwargs):
     """Run with performance profiling enabled"""
     profiler = cProfile.Profile()
     profiler.enable()
 
     # We call the main_func that gets passed in, along with its arguments!
-    exit_code = main_func(config_file=config_file, skip_gui=skip_gui)
+    exit_code = main_func(**main_kwargs)
 
     profiler.disable()
 
@@ -58,19 +58,19 @@ def run_with_profiling(main_func, config_file=None, skip_gui=False):
     return exit_code
 
 
-def run_with_memory_profiling(main_func, config_file=None, skip_gui=False):
+def run_with_memory_profiling(main_func, **main_kwargs):
     """Run with memory profiling enabled"""
     try:
         from memory_profiler import profile
 
         # Wrap the passed-in main function with memory profiler
         profiled_main = profile(main_func)
-        return profiled_main(config_file=config_file, skip_gui=skip_gui)
+        return profiled_main(**main_kwargs)
 
     except ImportError:
         print("memory_profiler not installed. Install with: pip install memory-profiler")
         # Fallback to normal execution if the profiler is missing
-        return main_func(config_file=config_file, skip_gui=skip_gui)
+        return main_func(**main_kwargs)
 
 class FPSCounter:
     """Efficient FPS counter with deque-based moving average"""

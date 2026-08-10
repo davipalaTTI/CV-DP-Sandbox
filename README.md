@@ -141,21 +141,146 @@ python main.py
 ```
 
 This launches the GUI configuration wizard:
-1. **Configuration Dialog** - Set model, input source, output folder, and options
-2. **Interactive Setup** - Draw counting lines, zones, and exclusion areas
-3. **Processing** - Real-time display with overlays and controls
+1. **Run Mode** - Choose scheduling and/or multiple cameras
+2. **Configuration** - Configure one source, or select saved camera configs for a deployment
+3. **Interactive Setup** - Draw counting lines, zones, and exclusion areas for a new camera config
+4. **Processing** - Run the selected source or camera deployment
 
-### Headless Mode (Automated/Scheduled Processing)
+### Reusing Saved Setup
 
 After your first run, a `config.json` file is saved in your output folder. Reuse it:
 
 ```bash
-# Skip all GUI - use saved lines/zones directly
+# Skip configuration/drawing and use saved lines/zones directly.
+# The runtime camera view still follows show_live_video in the config.
 python main.py --config path/to/config.json --no-gui
+
+# Disable all runtime windows for unattended execution
+python main.py --config path/to/config.json --headless
 
 # Load config but allow GUI modifications
 python main.py --config path/to/config.json
 ```
+
+### Scheduled Multi-Camera Deployment
+
+Lines, zones, exclusion areas, and processing settings are already stored in each
+camera's `config.json`. Keep one config and one output folder per camera. The
+deployment scheduler starts one isolated process for every camera whose local-time
+schedule is active.
+
+The normal user workflow is available from `python main.py`:
+
+- Leave both run-mode options off for the existing single-source setup.
+- Enable **Use an operating schedule** for one scheduled camera.
+- Enable **Process multiple cameras** for a continuous multi-camera deployment.
+- Enable both options for scheduled multi-camera processing.
+
+The deployment editor supports both first-time and existing cameras:
+
+- **Create Source** opens the original settings dialog with model selection and all
+  four input types: Folder, Video, Camera, and RTSP Stream. It then runs the existing
+  line and zone drawing workflow. When setup is complete, the config is saved and
+  the deployment list returns so the next source can be created.
+- **Add Saved Config** adds a camera whose setup was completed previously.
+- **Edit** changes the deployment name, exported **Video Source ID**, days, and
+  operating hours. The same ID is written to the `video_source` column for every
+  record produced by that camera.
+
+Each camera must use a different output folder. The editor shows that folder in the
+camera list and rejects duplicates before drawing or adding the camera. Segment
+files, master logs, video, training data, and the camera process log therefore stay
+separate. The generated manifest remains compatible with unattended startup and
+can still be edited manually when needed. On Windows, leave **Start at Windows
+boot** enabled when saving a scheduled deployment and accept the administrator
+prompt. **Install Startup Task** remains available to register it manually.
+
+To manage an existing schedule, load its deployment manifest and use **Edit** to
+change days, hours, or the source's **Enabled** setting. Saving the same manifest
+causes a running supervisor to reload it within `poll_seconds` and gracefully
+restart the managed camera processes with the new schedule. Use **View Startup
+Task** to see its Windows state, manifest path, last run, result, and loaded source
+schedules. **Remove Startup Task** stops and unregisters auto-start without deleting
+the deployment manifest, camera configs, or output data. Clearing **Start at
+Windows boot** offers the same removal action.
+
+1. Run `python main.py` and select the deployment run-mode options.
+2. Use **Create Source** for each new setup, choosing a unique output folder during
+   its settings step. Use **Add Saved Config** only for existing setups.
+3. Save or run the deployment. `deployment.example.json` remains available as a
+   manual template.
+3. Validate without starting cameras:
+
+```powershell
+.venv\Scripts\python.exe scripts\scheduled_runner.py --manifest deployment.json --check
+```
+
+4. Run the scheduler manually for an end-to-end check:
+
+```powershell
+.venv\Scripts\python.exe scripts\scheduled_runner.py --manifest deployment.json --show-windows
+```
+
+Manual runs and **Save and Run** honor each camera config's **Show Live Video**
+setting. Multi-camera windows include the source name and are arranged into screen
+tiles. Press `V` in a camera's status window to open that camera's live view.
+
+If the computer boots at any point inside an active window, that camera starts
+immediately and receives the window end as a graceful stop time. A failed camera
+process or disconnected stream is restarted while its window remains active.
+Overnight windows such as `22:00` to `06:00` are supported. Schedule times use the
+computer's local timezone, so automatic clock synchronization should be enabled.
+
+On Windows, run PowerShell as Administrator to install the scheduler at system
+startup under the `SYSTEM` account:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_windows_startup_task.ps1 `
+  -Manifest .\deployment.json
+```
+
+The startup task does not turn the computer on. Configure the BIOS/UEFI to restore
+power after AC loss, or use the platform's RTC wake feature. Let the application
+reach its scheduled stop and let Windows shut down before a smart plug removes
+power. Abrupt power removal can lose buffered events or corrupt the open video
+segment. A practical external-power schedule should leave several minutes between
+the application's end time and power removal.
+
+Each camera process loads its own model. Confirm that the GPU has enough memory for
+the intended camera count; CPU mode is available through each camera config when
+process isolation is more important than throughput.
+
+### Performance and Long-Running Diagnostics
+
+Live cameras use a latest-frame pipeline. A captured frame is submitted once, and
+if inference is slower than the camera, the one waiting frame is replaced with the
+newest frame. This avoids processing stale or duplicate frames and keeps latency
+low without imposing an artificial FPS limit. Recording also uses a small bounded
+writer queue so slow storage cannot consume unbounded memory.
+
+Every 30 seconds, each camera log reports capture FPS, inference FPS, analytics
+FPS, stale input drops, recording queue depth/drops, and process RSS memory. Stale
+input drops are expected whenever camera FPS is higher than model inference FPS;
+they show that the process is staying current rather than building latency.
+
+Advanced per-camera config values and defaults are:
+
+```json
+{
+  "camera_stall_timeout_seconds": 20.0,
+  "inference_stall_timeout_seconds": 120.0,
+  "max_consecutive_detection_errors": 30,
+  "performance_log_interval_seconds": 30.0,
+  "video_writer_queue_size": 8,
+  "video_writer_stall_timeout_seconds": 30.0
+}
+```
+
+A stalled camera read, hung inference, or repeated detection failure exits the
+camera child with a nonzero code so the deployment supervisor can restart it.
+Python exceptions and native faults are written under the process log directory's
+`crash_reports/` folder. `supervisor_exit_history.jsonl` records failed process
+exit codes and restart timing. Clean exits remove their unused empty crash file.
 
 ### Command Line Options
 
@@ -165,6 +290,8 @@ python main.py [options]
 Options:
   -c, --config FILE     Load configuration from JSON/YAML file
   --no-gui              Skip interactive setup (requires --config with saved lines)
+  --headless            Disable runtime windows and skip interactive setup
+  --crash-report-dir    Override the crash report directory
   -d, --debug           Enable debug logging (verbose output)
   -l, --log-file FILE   Specify log file path (default: logs/app.log)
   -v, --version         Show version information
@@ -181,14 +308,14 @@ python main.py
 # Load config, modify lines/zones in GUI, then process
 python main.py --config outputs/config.json
 
-# Fully headless - no GUI at all (for automation)
+# Reuse saved geometry and keep the configured live camera view
 python main.py --config outputs/config.json --no-gui
 
 # Headless with debug logging
-python main.py --config outputs/config.json --no-gui --debug
+python main.py --config outputs/config.json --headless --debug
 
 # Custom log file location
-python main.py --config outputs/config.json --no-gui --log-file /var/log/counter.log
+python main.py --config outputs/config.json --headless --log-file /var/log/counter.log
 ```
 
 ---
@@ -504,6 +631,7 @@ The configuration file is automatically saved and contains all settings:
   "model_path": "path/to/model.pt",
   "input_source": "path/to/videos",
   "output_folder": "path/to/output",
+  "source_name": "north_gate",
   "confidence_threshold": 0.45,
   "device": "cuda",
   "input_type": "folder",
@@ -623,7 +751,7 @@ When processing folders with files being actively recorded:
 ### Headless Mode Not Working
 
 - Ensure config file has saved `lines_config` (not empty)
-- Use both `--config` and `--no-gui` flags together
+- Use both `--config` and `--headless` flags together
 - Check that input/output paths are still valid
 
 ---

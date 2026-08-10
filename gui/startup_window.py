@@ -1,31 +1,95 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import logging
-from typing import Optional, Dict, List, Union
+import threading
+import time
+from typing import Callable, Optional, Dict, List, Set, Tuple, Union
 from pathlib import Path
 from dataclasses import asdict
 import cv2
 import json
 import yaml
 
-from config_manager import AppConfig, InputType, CountingZone, ExclusionZone, CountingLine
+from config_manager import (
+    AppConfig,
+    CountingLine,
+    CountingZone,
+    DeploymentRequest,
+    ExclusionZone,
+    InputType,
+)
 from utils.network import get_available_axis_cameras
+from utils.video_utils import load_source_preview
+
+
+INPUT_TYPE_OPTIONS = (
+    ("Folder", "folder"),
+    ("Video", "video"),
+    ("Camera", "camera"),
+    ("RTSP Stream", "rtsp"),
+)
+
+
+def input_control_states(input_type: str) -> Dict[str, str]:
+    """Return widget states for each source type without mutating the UI."""
+    if input_type == "camera":
+        return {
+            "label": "Input Source:",
+            "entry": "disabled",
+            "browse": "disabled",
+            "camera": "readonly",
+            "live_video": "normal",
+        }
+    if input_type == "rtsp":
+        return {
+            "label": "RTSP URL:",
+            "entry": "normal",
+            "browse": "disabled",
+            "camera": "disabled",
+            "live_video": "normal",
+        }
+    return {
+        "label": "Input Source:",
+        "entry": "normal",
+        "browse": "normal",
+        "camera": "disabled",
+        "live_video": "disabled",
+    }
+
+
+def create_dialog_window(parent: Optional[tk.Misc]):
+    """Create one root for standalone setup, or a child for deployment setup."""
+    return tk.Tk() if parent is None else tk.Toplevel(parent)
 
 class StartupWindow:
     """Manages the initial startup GUI configuration"""
 
-    def __init__(self):
+    def __init__(self, discover_sources: bool = True):
         self.logger = logging.getLogger(__name__)
+        self._source_discovery_enabled = discover_sources
+        self._sources_discovered = False
+        self._available_cameras = []
+        self._network_cameras = {}
+
+    def _ensure_source_discovery(self) -> None:
+        """Discover sources only when the single-source setup actually needs them."""
+        if not self._source_discovery_enabled or self._sources_discovered:
+            return
         self._available_cameras = self._detect_cameras()
-        # Scan for AXIS IP cameras
         self._network_cameras = get_available_axis_cameras()
+        self._sources_discovered = True
 
     @staticmethod
     def _is_rtsp_url(source: object) -> bool:
         """Return True when the configured source is an RTSP URL."""
         return isinstance(source, str) and source.strip().lower().startswith(("rtsp://", "rtsps://"))
 
-    def get_initial_config(self) -> Optional[AppConfig]:
+    def get_initial_config(
+        self,
+        new_camera_callback: Optional[
+            Callable[[Set[str], tk.Misc], Optional[str]]
+        ] = None,
+    ) -> Optional[Union[AppConfig, DeploymentRequest]]:
         """
         Get initial configuration from user through GUI
 
@@ -33,15 +97,208 @@ class StartupWindow:
             AppConfig object or None if canceled
         """
         try:
+            run_mode = self._show_run_mode_dialog()
+            if run_mode is None:
+                return None
+            schedule_enabled, multiple_cameras = run_mode
+            if schedule_enabled or multiple_cameras:
+                from gui.deployment_window import DeploymentWindow
+
+                return DeploymentWindow(
+                    schedule_enabled=schedule_enabled,
+                    multiple_cameras=multiple_cameras,
+                    new_camera_callback=new_camera_callback,
+                ).show()
+            self._ensure_source_discovery()
             return self._show_initial_config_dialog()
         except Exception as e:
             self.logger.error(f"Failed to get initial configuration: {e}")
             return None
 
-    def _show_initial_config_dialog(self) -> Optional[AppConfig]:
-        """Show the initial configuration dialog"""
+    def get_new_source_config(
+        self,
+        parent: tk.Misc,
+        reserved_output_folders: Optional[Set[str]] = None,
+    ) -> Optional[AppConfig]:
+        """Run the unchanged single-source settings dialog inside deployment setup."""
+        self._ensure_source_discovery()
+        return self._show_initial_config_dialog(
+            parent=parent,
+            reserved_output_folders=reserved_output_folders,
+        )
+
+    def get_source_preview(
+        self,
+        parent: tk.Misc,
+        config: AppConfig,
+        timeout_seconds: float = 12.0,
+    ):
+        """Read a preview without blocking Tk's event loop."""
+        progress = tk.Toplevel(parent)
+        progress.title("Checking Source")
+        progress.transient(parent)
+        progress.resizable(False, False)
+
+        frame = tk.Frame(progress, padx=22, pady=18)
+        frame.pack(fill="both", expand=True)
+        tk.Label(
+            frame,
+            text="Opening the source and reading a preview frame...",
+        ).pack(anchor="w")
+        indicator = ttk.Progressbar(frame, mode="indeterminate", length=360)
+        indicator.pack(fill="x", pady=(14, 8))
+        status_var = tk.StringVar(value="This can take a few seconds for network streams.")
+        tk.Label(frame, textvariable=status_var, fg="#555555").pack(anchor="w")
+
+        state = {
+            "done": False,
+            "canceled": False,
+            "result": None,
+            "timed_out": False,
+        }
+        started_at = time.monotonic()
+
+        def close_progress() -> None:
+            try:
+                indicator.stop()
+                progress.grab_release()
+            except tk.TclError:
+                pass
+            if progress.winfo_exists():
+                progress.destroy()
+
+        def cancel() -> None:
+            state["canceled"] = True
+            close_progress()
+
+        def read_preview() -> None:
+            state["result"] = load_source_preview(config)
+            state["done"] = True
+
+        def poll() -> None:
+            if state["done"]:
+                close_progress()
+                return
+            elapsed = time.monotonic() - started_at
+            if elapsed >= timeout_seconds:
+                state["timed_out"] = True
+                close_progress()
+                return
+            status_var.set(f"Waiting for source... {int(elapsed) + 1}s")
+            progress.after(100, poll)
+
+        progress.protocol("WM_DELETE_WINDOW", cancel)
+        progress.update_idletasks()
+        self.center_window(progress)
+        progress.grab_set()
+        indicator.start(12)
+        threading.Thread(target=read_preview, daemon=True).start()
+        progress.after(100, poll)
+        progress.wait_window()
+
+        if state["canceled"]:
+            return None
+        if state["timed_out"]:
+            messagebox.showerror(
+                "Source Unavailable",
+                f"The source did not respond within {timeout_seconds:g} seconds.\n\n"
+                "Check the camera selection, RTSP address, credentials, and network "
+                "connection, then try again.",
+                parent=parent,
+            )
+            return None
+
+        result = state["result"]
+        if result is None or result.frame is None:
+            error = result.error if result is not None else "Unknown preview error."
+            messagebox.showerror(
+                "Source Unavailable",
+                f"A preview frame could not be loaded.\n\n{error}",
+                parent=parent,
+            )
+            return None
+        return result.frame
+
+    def _show_run_mode_dialog(self) -> Optional[Tuple[bool, bool]]:
+        """Choose between the existing single-source flow and deployment mode."""
         root = tk.Tk()
+        root.title("Object Counter Startup")
+        root.resizable(False, False)
+
+        schedule_var = tk.BooleanVar(value=False)
+        multiple_var = tk.BooleanVar(value=False)
+        summary_var = tk.StringVar(value="Single source setup")
+        result = {"value": None}
+
+        def update_summary() -> None:
+            if schedule_var.get() and multiple_var.get():
+                summary_var.set("Scheduled multi-camera deployment")
+            elif schedule_var.get():
+                summary_var.set("Scheduled single-camera deployment")
+            elif multiple_var.get():
+                summary_var.set("Continuous multi-camera deployment")
+            else:
+                summary_var.set("Single source setup")
+
+        def continue_startup() -> None:
+            result["value"] = (schedule_var.get(), multiple_var.get())
+            root.quit()
+
+        def cancel() -> None:
+            result["value"] = None
+            root.quit()
+
+        container = ttk.Frame(root, padding=20)
+        container.pack(fill="both", expand=True)
+        ttk.Label(container, text="Run Mode", font=("TkDefaultFont", 13, "bold")).pack(
+            anchor="w", pady=(0, 14)
+        )
+        ttk.Checkbutton(
+            container,
+            text="Use an operating schedule",
+            variable=schedule_var,
+            command=update_summary,
+        ).pack(anchor="w", pady=5)
+        ttk.Checkbutton(
+            container,
+            text="Process multiple cameras",
+            variable=multiple_var,
+            command=update_summary,
+        ).pack(anchor="w", pady=5)
+        ttk.Separator(container).pack(fill="x", pady=14)
+        ttk.Label(container, textvariable=summary_var).pack(anchor="w")
+
+        actions = ttk.Frame(container, padding=(0, 18, 0, 0))
+        actions.pack(anchor="e")
+        ttk.Button(actions, text="Cancel", command=cancel).pack(side="left")
+        ttk.Button(actions, text="Continue", command=continue_startup).pack(
+            side="left", padx=(8, 0)
+        )
+
+        root.protocol("WM_DELETE_WINDOW", cancel)
+        root.bind("<Return>", lambda _event: continue_startup())
+        root.bind("<Escape>", lambda _event: cancel())
+        root.update_idletasks()
+        width, height = root.winfo_width(), root.winfo_height()
+        x = max(0, (root.winfo_screenwidth() - width) // 2)
+        y = max(0, (root.winfo_screenheight() - height) // 2)
+        root.geometry(f"+{x}+{y}")
+        root.mainloop()
+        root.destroy()
+        return result["value"]
+
+    def _show_initial_config_dialog(
+        self,
+        parent: Optional[tk.Misc] = None,
+        reserved_output_folders: Optional[Set[str]] = None,
+    ) -> Optional[AppConfig]:
+        """Show the initial configuration dialog"""
+        owns_root = parent is None
+        root = create_dialog_window(parent)
         root.title("Multi-Line Counter - Configuration")
+        if parent is not None:
+            root.transient(parent)
+            root.grab_set()
         root.resizable(True, True)
 
         # --- HEADLESS / REMOTE DESKTOP SAFETY ---
@@ -86,7 +343,7 @@ class StartupWindow:
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-        root.bind_all("<MouseWheel>", _on_mousewheel)
+        root.bind("<MouseWheel>", _on_mousewheel)
 
         # Variables
         config_vars = {
@@ -94,6 +351,7 @@ class StartupWindow:
             'input_type': tk.StringVar(value="folder"),
             'input_source': tk.StringVar(),
             'camera_index': tk.StringVar(value="0"),
+            'source_name': tk.StringVar(),
             'output_folder': tk.StringVar(),
             'enable_zones': tk.BooleanVar(value=False),
             'enable_heatmap': tk.BooleanVar(value=False),
@@ -131,6 +389,16 @@ class StartupWindow:
         align_var = tk.BooleanVar(value=True)  # align to :00/:15/:30/:45
 
         result_config = None
+
+        def close_dialog() -> None:
+            if owns_root:
+                root.quit()
+            else:
+                try:
+                    root.grab_release()
+                except tk.TclError:
+                    pass
+                root.destroy()
 
         def browse_model():
             """Browse for model file"""
@@ -181,29 +449,17 @@ class StartupWindow:
             )
             if folder:
                 config_vars['output_folder'].set(folder)
+                if not config_vars['source_name'].get().strip():
+                    config_vars['source_name'].set(Path(folder).name)
 
         def toggle_input_fields():
             """Toggle input widgets based on the selected source type."""
-            input_type = config_vars['input_type'].get()
-
-            if input_type == "camera":
-                input_source_label.config(text="Input Source:")
-                input_entry.config(state="disabled")
-                input_browse_btn.config(state="disabled")
-                camera_combo.config(state="readonly")
-                live_video_check.config(state="normal")
-            elif input_type == "rtsp":
-                input_source_label.config(text="RTSP URL:")
-                input_entry.config(state="normal")
-                input_browse_btn.config(state="disabled")
-                camera_combo.config(state="disabled")
-                live_video_check.config(state="normal")
-            else:
-                input_source_label.config(text="Input Source:")
-                input_entry.config(state="normal")
-                input_browse_btn.config(state="normal")
-                camera_combo.config(state="disabled")
-                live_video_check.config(state="disabled")
+            states = input_control_states(config_vars['input_type'].get())
+            input_source_label.config(text=states["label"])
+            input_entry.config(state=states["entry"])
+            input_browse_btn.config(state=states["browse"])
+            camera_combo.config(state=states["camera"])
+            live_video_check.config(state=states["live_video"])
 
         def validate_and_submit():
             """Validate inputs and create configuration"""
@@ -273,11 +529,24 @@ class StartupWindow:
 
             # Create output folder if it doesn't exist
             output_path = Path(config_vars['output_folder'].get())
+            normalized_output = str(output_path.resolve()).casefold()
+            if normalized_output in (reserved_output_folders or set()):
+                messagebox.showerror(
+                    "Output Folder",
+                    "Each deployment source requires a separate output folder.",
+                    parent=root,
+                )
+                return
             try:
                 output_path.mkdir(parents=True, exist_ok=True)
             except Exception as e:
                 messagebox.showerror("Error", f"Cannot create output folder: {e}", parent=root)
                 return
+
+            source_name = config_vars['source_name'].get().strip()
+            if not source_name:
+                source_name = output_path.name.strip() or "video_source"
+                config_vars['source_name'].set(source_name)
 
             # NEW: read aggregation options
             segment_split_minutes = int(agg_var.get())
@@ -319,6 +588,7 @@ class StartupWindow:
                 frame_skip=int(config_vars['frame_skip'].get()),
                 interpolate_tracks=bool(config_vars['interpolate_tracks'].get()),
                 show_live_video=bool(config_vars['show_live_video'].get()) if is_camera else False,
+                source_name=source_name,
                 max_parallel_videos=int(config_vars['max_parallel_videos'].get()),
                 # --- NEW: training params ---
                 training_mode=training_vars['training_mode'].get(),
@@ -333,11 +603,11 @@ class StartupWindow:
                 enable_api_upload=cloud_db_vars['enable_api_upload'].get(),
             )
 
-            root.quit()
+            close_dialog()
 
         def cancel():
             """Cancel configuration"""
-            root.quit()
+            close_dialog()
 
         # --- UPDATED LAYOUT (Everything uses scrollable_frame) ---
         row = 0
@@ -359,14 +629,14 @@ class StartupWindow:
         )
         input_frame = tk.Frame(scrollable_frame)
         input_frame.grid(row=row, column=1, sticky="w", padx=5, pady=5)
-        tk.Radiobutton(input_frame, text="Folder", variable=config_vars['input_type'],
-                       value="folder", command=lambda: toggle_input_fields()).pack(side="left")
-        tk.Radiobutton(input_frame, text="Video", variable=config_vars['input_type'],
-                       value="video", command=lambda: toggle_input_fields()).pack(side="left")
-        tk.Radiobutton(input_frame, text="Camera", variable=config_vars['input_type'],
-                       value="camera", command=lambda: toggle_input_fields()).pack(side="left")
-        tk.Radiobutton(input_frame, text="RTSP Stream", variable=config_vars['input_type'],
-                       value="rtsp", command=lambda: toggle_input_fields()).pack(side="left")
+        for label, value in INPUT_TYPE_OPTIONS:
+            tk.Radiobutton(
+                input_frame,
+                text=label,
+                variable=config_vars['input_type'],
+                value=value,
+                command=toggle_input_fields,
+            ).pack(side="left")
         row += 1
 
         # Input source / RTSP URL
@@ -403,6 +673,15 @@ class StartupWindow:
             config_vars['camera_index'].set(camera_values[0])
 
         camera_combo.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+        row += 1
+
+        # Stable identifier written to the exported video_source column.
+        tk.Label(scrollable_frame, text="Video Source ID:", font=("Arial", 10, "bold")).grid(
+            row=row, column=0, sticky="w", padx=10, pady=5
+        )
+        tk.Entry(scrollable_frame, textvariable=config_vars['source_name'], width=50).grid(
+            row=row, column=1, padx=5, pady=5, sticky="ew"
+        )
         row += 1
 
         # Output folder
@@ -596,6 +875,14 @@ class StartupWindow:
                 if loaded_config is None:
                     messagebox.showerror("Error", "Failed to load configuration file.", parent=root)
                     return
+                loaded_output = str(Path(loaded_config.output_folder).resolve()).casefold()
+                if loaded_output in (reserved_output_folders or set()):
+                    messagebox.showerror(
+                        "Output Folder",
+                        "Each deployment source requires a separate output folder.",
+                        parent=root,
+                    )
+                    return
 
                 # Validate essential paths
                 errors = []
@@ -612,8 +899,9 @@ class StartupWindow:
                     if not messagebox.askyesno("Path Validation", error_msg, parent=root):
                         return
 
-                # Check if config has lines configured - offer to skip setup
-                if loaded_config.lines_config:
+                # Check if config has counting geometry - offer to skip setup.
+                # A zone-only configuration is valid.
+                if loaded_config.lines_config or loaded_config.zones_config:
                     msg = f"Configuration loaded successfully!\n\n"
                     msg += f"• {len(loaded_config.lines_config)} counting line(s)\n"
                     msg += f"• {len(loaded_config.zones_config)} zone(s)\n"
@@ -625,11 +913,12 @@ class StartupWindow:
                         # Use directly - skip GUI setup
                         result_config = loaded_config
                         result_config._skip_gui_setup = True  # Flag to skip interactive setup
-                        root.quit()
+                        close_dialog()
                         return
 
                 # Populate the dialog fields with loaded values
                 config_vars['model_path'].set(loaded_config.model_path)
+                config_vars['source_name'].set(getattr(loaded_config, 'source_name', ''))
                 config_vars['output_folder'].set(loaded_config.output_folder)
                 config_vars['enable_zones'].set(loaded_config.enable_zones)
                 config_vars['enable_heatmap'].set(loaded_config.enable_heatmap)
@@ -706,8 +995,12 @@ class StartupWindow:
         # so the window is centered correctly once all widgets are drawn.
         self.center_window(root)
 
-        root.mainloop()
-        root.destroy()
+        root.protocol("WM_DELETE_WINDOW", cancel)
+        if owns_root:
+            root.mainloop()
+            root.destroy()
+        else:
+            root.wait_window()
         return result_config
 
         # Show effective FPS

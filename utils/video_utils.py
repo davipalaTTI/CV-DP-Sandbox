@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Union, Dict, Any, Optional
@@ -10,6 +11,106 @@ from utils.file_io import get_file_size_mb, generate_unique_filename
 
 
 # ======================== VIDEO UTILITIES ========================
+
+VIDEO_FILE_PATTERNS = (
+    "*.mp4", "*.avi", "*.mov", "*.mkv", "*.wmv", "*.flv",
+    "*.MP4", "*.AVI", "*.MOV", "*.MKV", "*.WMV", "*.FLV",
+)
+
+
+@dataclass
+class SourcePreviewResult:
+    """Result of opening a configured source and reading one frame."""
+
+    frame: Optional[np.ndarray] = None
+    error: Optional[str] = None
+
+
+def _input_type_value(config: Any) -> str:
+    input_type = getattr(config, "input_type", "")
+    return str(getattr(input_type, "value", input_type)).lower()
+
+
+def _resolve_preview_source(config: Any) -> tuple[Optional[Union[str, int]], Optional[str]]:
+    """Resolve a config to one concrete source without exposing stream credentials."""
+    if _input_type_value(config) != "folder":
+        return getattr(config, "input_source", None), None
+
+    folder_path = Path(config.input_source)
+    video_files = []
+    for pattern in VIDEO_FILE_PATTERNS:
+        video_files.extend(folder_path.glob(pattern))
+    video_files.sort(key=lambda path: path.name.casefold())
+    if not video_files:
+        return None, "No supported video files were found in the selected folder."
+    return str(video_files[0]), None
+
+
+def _open_preview_capture(
+    source: Union[str, int],
+    input_type: str,
+    open_timeout_ms: int,
+    read_timeout_ms: int,
+) -> cv2.VideoCapture:
+    """Open a source with backend-level timeouts where OpenCV supports them."""
+    if input_type == "rtsp":
+        params = [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+            int(open_timeout_ms),
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+            int(read_timeout_ms),
+        ]
+        try:
+            return cv2.VideoCapture(str(source), cv2.CAP_FFMPEG, params)
+        except (cv2.error, TypeError):
+            # Older OpenCV builds lack the constructor overload. The caller also
+            # enforces an application-level deadline while this runs in a worker.
+            return cv2.VideoCapture(str(source), cv2.CAP_FFMPEG)
+
+    return cv2.VideoCapture(source)
+
+
+def load_source_preview(
+    config: Any,
+    open_timeout_ms: int = 8000,
+    read_timeout_ms: int = 8000,
+) -> SourcePreviewResult:
+    """Read one preview frame from folder, video, camera, or RTSP input."""
+    source, error = _resolve_preview_source(config)
+    if error:
+        return SourcePreviewResult(error=error)
+    if source is None or source == "":
+        return SourcePreviewResult(error="The selected source is empty.")
+
+    input_type = _input_type_value(config)
+    capture = None
+    try:
+        capture = _open_preview_capture(
+            source,
+            input_type,
+            open_timeout_ms,
+            read_timeout_ms,
+        )
+        if not capture.isOpened():
+            return SourcePreviewResult(
+                error="The source could not be opened. Check the camera selection, "
+                "stream address, credentials, and network connection."
+            )
+
+        success, frame = capture.read()
+        if not success or frame is None:
+            return SourcePreviewResult(
+                error="The source opened, but no preview frame could be read."
+            )
+        return SourcePreviewResult(frame=frame)
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "Source preview failed for input type %s: %s", input_type, exc
+        )
+        return SourcePreviewResult(error=f"OpenCV could not read the source: {exc}")
+    finally:
+        if capture is not None:
+            capture.release()
 
 def get_video_properties(video_path: Union[str, Path]) -> Dict[str, Any]:
     """

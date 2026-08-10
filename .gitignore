@@ -8,8 +8,11 @@
 !.gitignore
 !main.py
 !config_manager.py
+!deployment_manager.py
 !requirements.txt
 !README.md
+!AI_PROJECT_GUIDE.md
+!deployment.example.json
 
 # =======================================================
 # 4. TRACK ENTIRE CODE FOLDERS (BEST PRACTICE)
@@ -19,6 +22,7 @@
 !gui/**
 !utils/**
 !scripts/**
+!tests/**
 
 # =======================================================
 # 5. RE-IGNORE GENERATED JUNK INSIDE TRACKED FOLDERS
@@ -30,3 +34,5 @@ __pycache__/
 *$py.class
 *.log
 .env
+/tests/
+/AI_PROJECT_GUIDE.md

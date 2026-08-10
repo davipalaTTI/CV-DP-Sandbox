@@ -1,8 +1,18 @@
 import argparse
+from datetime import datetime
 
 __version__ = "1.0.1"
 
-def parse_arguments():
+def _parse_datetime(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be an ISO local datetime such as 2026-08-05T18:30:00"
+        ) from exc
+
+
+def parse_arguments(argv=None):
     """Parse command line arguments"""
 
     parser = argparse.ArgumentParser(
@@ -18,14 +28,56 @@ Examples:
 
     # Core Application Arguments
     parser.add_argument(
-        "--config",
+        "-c", "--config",
         type=str,
         help="Path to a specific config.json file to load"
     )
     parser.add_argument(
         "--no-gui",
         action="store_true",
-        help="Skip the interactive GUI setup and run headlessly"
+        help="Skip interactive configuration and use saved counting geometry"
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Disable runtime display windows (also skips interactive setup)"
+    )
+    parser.add_argument(
+        "--source-name",
+        type=str,
+        help="Override the source name written to event exports"
+    )
+    parser.add_argument(
+        "--stop-at",
+        type=_parse_datetime,
+        help="Stop gracefully at an ISO local datetime (used by the scheduler)"
+    )
+    parser.add_argument(
+        "--window-index",
+        type=int,
+        default=0,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--window-count",
+        type=int,
+        default=1,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "-d", "--debug",
+        action="store_true",
+        help="Enable debug logging"
+    )
+    parser.add_argument(
+        "-l", "--log-file",
+        type=str,
+        help="Write logs to this file (default: logs/app.log)"
+    )
+    parser.add_argument(
+        "--crash-report-dir",
+        type=str,
+        help="Directory for native/Python crash reports"
     )
 
     # Development & Profiling Arguments (These were the missing ones!)
@@ -40,4 +92,4 @@ Examples:
         help="Run the application with memory profiling enabled"
     )
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
