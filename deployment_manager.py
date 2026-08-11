@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -36,6 +37,14 @@ class ManifestError(ValueError):
 def resolve_path(value: str, base_dir: Path) -> Path:
     path = Path(value).expanduser()
     return path.resolve() if path.is_absolute() else (base_dir / path).resolve()
+
+
+def absolute_path_preserving_symlink(value: str, base_dir: Path) -> Path:
+    """Build an absolute path without dereferencing a virtualenv executable symlink."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return Path(os.path.abspath(str(path)))
 
 
 def _parse_clock(value: Any, field_name: str) -> clock_time:
@@ -168,7 +177,7 @@ def load_deployment(manifest_path: Path) -> Deployment:
     default_root = Path(__file__).resolve().parent
     project_root = resolve_path(str(data.get("project_root", default_root)), manifest_dir)
     python_value = str(data.get("python_executable", sys.executable))
-    python_executable = resolve_path(python_value, manifest_dir)
+    python_executable = absolute_path_preserving_symlink(python_value, manifest_dir)
 
     if not (project_root / "main.py").is_file():
         raise ManifestError(f"project_root does not contain main.py: {project_root}")

@@ -1,5 +1,4 @@
 {
-  "python_executable": ".venv/Scripts/python.exe",
   "poll_seconds": 5,
   "restart_delay_seconds": 15,
   "shutdown_grace_seconds": 30,

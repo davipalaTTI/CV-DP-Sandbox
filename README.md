@@ -192,23 +192,26 @@ camera list and rejects duplicates before drawing or adding the camera. Segment
 files, master logs, video, training data, and the camera process log therefore stay
 separate. The generated manifest remains compatible with unattended startup and
 can still be edited manually when needed. On Windows, leave **Start at Windows
-boot** enabled when saving a scheduled deployment and accept the administrator
-prompt. **Install Startup Task** remains available to register it manually.
+boot** enabled. On Jetson/Linux, leave **Start at device boot** enabled. Saving
+opens the platform's administrator authentication prompt and installs the boot
+task or service.
 
 To manage an existing schedule, load its deployment manifest and use **Edit** to
 change days, hours, or the source's **Enabled** setting. Saving the same manifest
 causes a running supervisor to reload it within `poll_seconds` and gracefully
-restart the managed camera processes with the new schedule. Use **View Startup
-Task** to see its Windows state, manifest path, last run, result, and loaded source
-schedules. **Remove Startup Task** stops and unregisters auto-start without deleting
-the deployment manifest, camera configs, or output data. Clearing **Start at
-Windows boot** offers the same removal action.
+restart the managed camera processes with the new schedule. Use **Manage Startup
+Tasks** on Windows or **Manage Startup Services** on Jetson to list registered
+CV-DP schedulers, including renamed or legacy Windows tasks identified by their
+registered runner action. **Stop Running** ends the current scheduler but keeps its
+startup registration. **Remove Schedule** stops and unregisters it without deleting
+the deployment manifest, camera configs, or output data.
 
 1. Run `python main.py` and select the deployment run-mode options.
 2. Use **Create Source** for each new setup, choosing a unique output folder during
    its settings step. Use **Add Saved Config** only for existing setups.
 3. Save or run the deployment. `deployment.example.json` remains available as a
-   manual template.
+   platform-neutral manual template; when `python_executable` is omitted, the
+   scheduler uses the interpreter that launched it.
 3. Validate without starting cameras:
 
 ```powershell
@@ -239,12 +242,39 @@ powershell -ExecutionPolicy Bypass -File scripts\install_windows_startup_task.ps
   -Manifest .\deployment.json
 ```
 
-The startup task does not turn the computer on. Configure the BIOS/UEFI to restore
-power after AC loss, or use the platform's RTC wake feature. Let the application
-reach its scheduled stop and let Windows shut down before a smart plug removes
-power. Abrupt power removal can lose buffered events or corrupt the open video
-segment. A practical external-power schedule should leave several minutes between
-the application's end time and power removal.
+The GUI task manager is preferred when more than one CV-DP task exists. The
+PowerShell equivalent for listing every detected CV-DP task is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\manage_windows_startup_task.ps1 `
+  -Operation List
+```
+
+On NVIDIA Jetson/Ubuntu, the GUI uses the normal PolicyKit authentication prompt
+to install `cv-dp-camera-scheduler.service`. It runs headlessly as the user who
+installed it, waits for networking, and is enabled through `systemd`. The terminal
+equivalent is:
+
+```bash
+sudo bash scripts/install_linux_startup_service.sh \
+  --manifest "$(realpath deployment.json)" \
+  --python-executable "$PWD/.venv/bin/python"
+```
+
+Inspect or remove the Jetson service with:
+
+```bash
+systemctl status cv-dp-camera-scheduler.service --no-pager
+journalctl -u cv-dp-camera-scheduler.service -f
+sudo bash scripts/manage_linux_startup_service.sh --operation remove
+```
+
+The boot task/service does not turn the device on. Configure the Jetson carrier
+board or power controller to restore power after AC loss, or use the platform's
+supported wake mechanism. Let the application reach its scheduled stop before a
+smart plug removes power. Abrupt power removal can lose buffered events or corrupt
+the open video segment. A practical external-power schedule should leave several
+minutes between the application's end time and power removal.
 
 Each camera process loads its own model. Confirm that the GPU has enough memory for
 the intended camera count; CPU mode is available through each camera config when

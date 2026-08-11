@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import sys
 import threading
 from datetime import datetime
@@ -20,6 +19,15 @@ from deployment_manager import (
     read_document,
     validate_source_config,
 )
+from utils.startup_service import (
+    launch_startup_install,
+    launch_startup_remove,
+    launch_startup_stop,
+    query_startup_entries,
+    startup_boot_label,
+    startup_service_kind,
+    startup_service_supported,
+)
 
 
 DAY_OPTIONS = (
@@ -32,9 +40,6 @@ DAY_OPTIONS = (
     ("Sun", "sun"),
 )
 
-STARTUP_TASK_NAME = "CV-DP Camera Scheduler"
-
-
 def configured_video_source(config_path: str) -> str:
     """Read the exported video source identifier from an existing source config."""
     try:
@@ -42,44 +47,6 @@ def configured_video_source(config_path: str) -> str:
     except ManifestError:
         return ""
     return str(value).strip()
-
-
-def query_windows_startup_task(project_root: Path) -> Dict:
-    """Return structured status for the application's Windows startup task."""
-    manager = project_root / "scripts" / "manage_windows_startup_task.ps1"
-    if not manager.is_file():
-        raise OSError(f"Startup task manager was not found: {manager}")
-    kwargs = {}
-    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    completed = subprocess.run(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(manager),
-            "-Operation",
-            "Status",
-            "-TaskName",
-            STARTUP_TASK_NAME,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-        **kwargs,
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise OSError(detail or "Windows could not query the startup task")
-    json_lines = [line for line in completed.stdout.splitlines() if line.lstrip().startswith("{")]
-    if not json_lines:
-        raise OSError("Windows returned no startup task status")
-    try:
-        return json.loads(json_lines[-1])
-    except json.JSONDecodeError as exc:
-        raise OSError("Windows returned invalid startup task status") from exc
 
 
 class DeploymentWindow:
@@ -155,10 +122,10 @@ class DeploymentWindow:
             variable=self.multiple_var,
             command=self._on_multiple_changed,
         ).pack(side="left", padx=(24, 0))
-        if sys.platform == "win32":
+        if startup_service_supported():
             ttk.Checkbutton(
                 mode_frame,
-                text="Start at Windows boot",
+                text=f"Start at {startup_boot_label()}",
                 variable=self.auto_start_var,
                 command=self._on_auto_start_changed,
             ).pack(side="left", padx=(24, 0))
@@ -209,21 +176,17 @@ class DeploymentWindow:
         actions = ttk.Frame(outer, padding=(0, 10, 0, 0))
         actions.grid(row=4, column=0, sticky="e")
         ttk.Button(actions, text="Cancel", command=self._cancel).pack(side="left")
-        if sys.platform == "win32":
+        if startup_service_supported():
+            service_kind = startup_service_kind()
             ttk.Button(
                 actions,
-                text="View Startup Task",
-                command=self._show_startup_task_status,
+                text=f"Manage Startup {service_kind}s",
+                command=self._show_startup_status,
             ).pack(side="left", padx=(8, 0))
             ttk.Button(
                 actions,
-                text="Remove Startup Task",
-                command=self._remove_startup_task,
-            ).pack(side="left", padx=(8, 0))
-            ttk.Button(
-                actions,
-                text="Install Startup Task",
-                command=self._install_startup_task,
+                text=f"Install Startup {service_kind}",
+                command=self._install_startup_service,
             ).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Save", command=lambda: self._save_manifest(False)).pack(
             side="left", padx=(8, 0)
@@ -278,7 +241,7 @@ class DeploymentWindow:
             self.multiple_var.set(len(self.cameras) > 1)
             has_schedule = any(not job.schedule.always for job in deployment.jobs)
             self.schedule_var.set(has_schedule)
-            if sys.platform == "win32" and has_schedule:
+            if startup_service_supported() and has_schedule:
                 self.auto_start_var.set(True)
             self._refresh_tree()
         except (ManifestError, OSError) as exc:
@@ -497,13 +460,62 @@ class DeploymentWindow:
         self._refresh_tree()
 
     def _on_schedule_changed(self) -> None:
-        if sys.platform == "win32" and self.schedule_var.get():
+        if startup_service_supported() and self.schedule_var.get():
             self.auto_start_var.set(True)
         self._refresh_tree()
 
     def _on_auto_start_changed(self) -> None:
-        if not self.auto_start_var.get() and not self._remove_startup_task():
+        if self.auto_start_var.get():
+            return
+
+        self.status_var.set("Checking for registered startup schedules...")
+        state = {"done": False, "entries": [], "error": None}
+
+        def worker() -> None:
+            try:
+                state["entries"] = query_startup_entries(self.project_root)
+            except Exception as exc:
+                state["error"] = str(exc)
+            finally:
+                state["done"] = True
+
+        def display() -> None:
+            if state["error"] is not None:
+                self.auto_start_var.set(True)
+                self.status_var.set("Startup schedule status unavailable")
+                messagebox.showerror(
+                    "Startup Service",
+                    state["error"],
+                    parent=self.root,
+                )
+                return
+            if not state["entries"]:
+                self.status_var.set("Startup at boot disabled")
+                return
+
             self.auto_start_var.set(True)
+            count = len(state["entries"])
+            noun = "schedule" if count == 1 else "schedules"
+            if messagebox.askyesno(
+                "Manage Startup Schedules",
+                f"{count} registered CV-DP startup {noun} must be stopped or removed "
+                "explicitly. Open the startup manager now?",
+                parent=self.root,
+            ):
+                self._show_startup_status()
+
+        def poll() -> None:
+            if state["done"]:
+                display()
+            else:
+                self.root.after(100, poll)
+
+        threading.Thread(
+            target=worker,
+            name="startup-service-disable-check",
+            daemon=True,
+        ).start()
+        self.root.after(100, poll)
 
     def _refresh_tree(self) -> None:
         if not hasattr(self, "tree"):
@@ -604,10 +616,10 @@ class DeploymentWindow:
             return
 
         if (
-            sys.platform == "win32"
+            startup_service_supported()
             and getattr(self, "auto_start_var", None) is not None
             and self.auto_start_var.get()
-            and not self._launch_startup_task_installer(manifest_path)
+            and not self._launch_startup_installer(manifest_path)
         ):
             return
 
@@ -617,161 +629,242 @@ class DeploymentWindow:
         else:
             messagebox.showinfo("Deployment Saved", f"Saved to:\n{manifest_path}", parent=self.root)
 
-    def _install_startup_task(self) -> None:
+    def _install_startup_service(self) -> None:
         manifest_path = self._write_manifest()
         if manifest_path is None:
             return
 
-        self._launch_startup_task_installer(manifest_path)
+        self._launch_startup_installer(manifest_path)
 
-    def _launch_startup_task_installer(self, manifest_path: Path) -> bool:
-        """Open the elevated Windows installer for the persistent startup task."""
-
-        installer = self.project_root / "scripts" / "install_windows_startup_task.ps1"
-        if not installer.is_file():
-            messagebox.showerror(
-                "Startup Task",
-                f"Installer script was not found:\n{installer}",
-                parent=self.root,
-            )
-            return False
-
+    def _launch_startup_installer(self, manifest_path: Path) -> bool:
+        """Open the platform authentication prompt for persistent boot startup."""
         try:
-            import ctypes
-
-            parameters = (
-                f'-NoProfile -ExecutionPolicy Bypass -File "{installer}" '
-                f'-Manifest "{manifest_path}"'
+            prompt = launch_startup_install(
+                self.project_root,
+                manifest_path,
+                sys.executable,
             )
-            result = ctypes.windll.shell32.ShellExecuteW(
-                None,
-                "runas",
-                "powershell.exe",
-                parameters,
-                str(self.project_root),
-                1,
-            )
-            if result <= 32:
-                raise OSError(f"Windows ShellExecute error {result}")
         except OSError as exc:
-            messagebox.showerror("Startup Task", str(exc), parent=self.root)
+            messagebox.showerror("Startup Service", str(exc), parent=self.root)
             return False
 
         messagebox.showinfo(
-            "Startup Task",
-            "Accept the administrator prompt to enable startup after every Windows boot. "
-            "A boot during an active schedule starts the camera immediately.",
+            "Startup Service",
+            prompt,
             parent=self.root,
         )
         return True
 
-    def _show_startup_task_status(self) -> None:
-        self.status_var.set("Checking Windows startup task...")
-        state = {"done": False, "task_status": None, "error": None}
+    def _show_startup_status(self) -> None:
+        service_kind = startup_service_kind().lower()
+        service_label = startup_service_kind()
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Startup {service_label} Manager")
+        dialog.geometry("980x430")
+        dialog.minsize(760, 340)
+        dialog.transient(self.root)
 
-        def worker() -> None:
-            try:
-                state["task_status"] = query_windows_startup_task(self.project_root)
-            except OSError as exc:
-                state["error"] = str(exc)
-            finally:
-                state["done"] = True
+        outer = ttk.Frame(dialog, padding=12)
+        outer.pack(fill="both", expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(0, weight=1)
 
-        def display() -> None:
-            error = state["error"]
-            task_status = state["task_status"]
-            if error is not None:
-                self.status_var.set("Startup task status unavailable")
-                messagebox.showerror("Startup Task", error, parent=self.root)
+        columns = ("name", "state", "manifest", "last_run", "result")
+        task_tree = ttk.Treeview(
+            outer,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+        )
+        task_tree.heading("name", text=service_label)
+        task_tree.heading("state", text="State")
+        task_tree.heading("manifest", text="Deployment Manifest")
+        task_tree.heading("last_run", text="Last Run")
+        task_tree.heading("result", text="Last Result")
+        task_tree.column("name", width=210, minwidth=150)
+        task_tree.column("state", width=110, minwidth=90, anchor="center")
+        task_tree.column("manifest", width=310, minwidth=180)
+        task_tree.column("last_run", width=150, minwidth=120)
+        task_tree.column("result", width=100, minwidth=80, anchor="center")
+        task_tree.grid(row=0, column=0, sticky="nsew")
+
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=task_tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        task_tree.configure(yscrollcommand=scrollbar.set)
+
+        detail_var = tk.StringVar(value=f"Checking registered startup {service_kind}s...")
+        ttk.Label(outer, textvariable=detail_var).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        )
+
+        actions = ttk.Frame(outer, padding=(0, 10, 0, 0))
+        actions.grid(row=2, column=0, columnspan=2, sticky="e")
+        entries = {}
+        refresh_generation = [0]
+
+        def selected_entry() -> Optional[Dict]:
+            selection = task_tree.selection()
+            return entries.get(selection[0]) if selection else None
+
+        stop_button = ttk.Button(actions, text="Stop Running", state="disabled")
+        stop_button.pack(side="left")
+        remove_button = ttk.Button(actions, text="Remove Schedule", state="disabled")
+        remove_button.pack(side="left", padx=(8, 0))
+        refresh_button = ttk.Button(actions, text="Refresh")
+        refresh_button.pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Close", command=dialog.destroy).pack(
+            side="left", padx=(8, 0)
+        )
+
+        def update_selection(_event=None) -> None:
+            entry = selected_entry()
+            if entry is None:
+                stop_button.configure(state="disabled")
+                remove_button.configure(state="disabled")
                 return
-            if not task_status.get("installed", False):
-                self.status_var.set("Startup task: Not installed")
-                messagebox.showinfo(
-                    "Startup Task",
-                    "No Windows startup task is currently installed.",
-                    parent=self.root,
+            state_text = str(entry.get("state", "Unknown"))
+            running = "running" in state_text.lower()
+            stop_button.configure(state="normal" if running else "disabled")
+            remove_button.configure(state="normal")
+            manifest = str(entry.get("manifest", "")) or "Unknown"
+            detail_var.set(f"Manifest: {manifest}")
+
+        def display_results(result_state: Dict, generation: int) -> None:
+            if generation != refresh_generation[0] or not dialog.winfo_exists():
+                return
+            refresh_button.configure(state="normal")
+            error = result_state["error"]
+            if error is not None:
+                detail_var.set(f"Startup {service_kind} status unavailable")
+                messagebox.showerror("Startup Service", error, parent=dialog)
+                return
+
+            entries.clear()
+            task_tree.delete(*task_tree.get_children())
+            for index, entry in enumerate(result_state["entries"]):
+                task_name = str(entry.get("task_name", "Unknown"))
+                task_path = str(entry.get("task_path", ""))
+                display_name = f"{task_path}{task_name}" if task_path else task_name
+                item_id = f"startup-{index}"
+                entries[item_id] = entry
+                task_tree.insert(
+                    "",
+                    "end",
+                    iid=item_id,
+                    values=(
+                        display_name,
+                        entry.get("state", "Unknown"),
+                        entry.get("manifest", "") or "Unknown",
+                        entry.get("last_run_time", "") or "Never",
+                        entry.get("last_result", "Unknown"),
+                    ),
+                )
+
+            count = len(entries)
+            self.status_var.set(f"Startup {service_kind}s found: {count}")
+            if count:
+                first = next(iter(entries))
+                task_tree.selection_set(first)
+                task_tree.focus(first)
+                update_selection()
+            else:
+                detail_var.set(f"No CV-DP startup {service_kind}s are registered.")
+                stop_button.configure(state="disabled")
+                remove_button.configure(state="disabled")
+
+        def refresh() -> None:
+            refresh_generation[0] += 1
+            generation = refresh_generation[0]
+            refresh_button.configure(state="disabled")
+            stop_button.configure(state="disabled")
+            remove_button.configure(state="disabled")
+            detail_var.set(f"Checking registered startup {service_kind}s...")
+            result_state = {"done": False, "entries": [], "error": None}
+
+            def worker() -> None:
+                try:
+                    result_state["entries"] = query_startup_entries(self.project_root)
+                except Exception as exc:
+                    result_state["error"] = str(exc)
+                finally:
+                    result_state["done"] = True
+
+            def poll() -> None:
+                if not dialog.winfo_exists() or generation != refresh_generation[0]:
+                    return
+                if result_state["done"]:
+                    display_results(result_state, generation)
+                else:
+                    dialog.after(100, poll)
+
+            threading.Thread(
+                target=worker,
+                name="startup-service-status",
+                daemon=True,
+            ).start()
+            dialog.after(100, poll)
+
+        def run_operation(operation: str) -> None:
+            entry = selected_entry()
+            if entry is None:
+                messagebox.showwarning(
+                    "Startup Service",
+                    f"Select a startup {service_kind} first.",
+                    parent=dialog,
                 )
                 return
 
-            task_state = str(task_status.get("state", "Unknown"))
-            manifest = str(task_status.get("manifest", "")) or "Unknown"
-            last_run = str(task_status.get("last_run_time", "")) or "Never"
-            last_result = task_status.get("last_result", "Unknown")
-            schedule_lines = []
-            for camera in self.cameras:
-                if not camera["enabled"]:
-                    schedule = "Disabled"
-                elif self.schedule_var.get():
-                    days = " ".join(day.title() for day in camera["days"])
-                    schedule = f"{days}: {camera['start']} - {camera['end']}"
-                else:
-                    schedule = "Continuous"
-                schedule_lines.append(f"{camera['name']}: {schedule}")
-            schedules = "\n".join(schedule_lines) or "No sources loaded"
-            self.status_var.set(f"Startup task: {task_state}")
-            messagebox.showinfo(
-                "Startup Task",
-                f"Installed: Yes\nState: {task_state}\nManifest: {manifest}\n"
-                f"Last run: {last_run}\nLast result: {last_result}\n\n"
-                f"Loaded source schedules:\n{schedules}",
-                parent=self.root,
-            )
-
-        def poll() -> None:
-            if state["done"]:
-                display()
+            task_name = str(entry.get("task_name", ""))
+            task_path = str(entry.get("task_path", "\\"))
+            display_name = f"{task_path}{task_name}" if task_path else task_name
+            if operation == "stop":
+                question = (
+                    f"Stop the currently running scheduler for {display_name}?\n\n"
+                    "The schedule will remain registered for its next startup trigger."
+                )
             else:
-                self.root.after(100, poll)
+                question = (
+                    f"Stop and remove the schedule {display_name}?\n\n"
+                    "Saved deployment, camera configs, and output data will not be deleted."
+                )
+            if not messagebox.askyesno("Startup Service", question, parent=dialog):
+                return
 
-        threading.Thread(target=worker, name="startup-task-status", daemon=True).start()
-        self.root.after(100, poll)
+            try:
+                if operation == "stop":
+                    prompt = launch_startup_stop(
+                        self.project_root,
+                        task_name,
+                        task_path,
+                    )
+                else:
+                    prompt = launch_startup_remove(
+                        self.project_root,
+                        task_name,
+                        task_path,
+                    )
+                    self.auto_start_var.set(False)
+            except OSError as exc:
+                messagebox.showerror("Startup Service", str(exc), parent=dialog)
+                return
 
-    def _remove_startup_task(self) -> bool:
-        confirmed = messagebox.askyesno(
-            "Remove Startup Task",
-            "Remove the Windows startup task and stop its unattended scheduler?\n\n"
-            "Saved deployment, camera configs, and output data will not be deleted.",
-            parent=self.root,
-        )
-        if not confirmed:
-            return False
-
-        manager = self.project_root / "scripts" / "manage_windows_startup_task.ps1"
-        if not manager.is_file():
-            messagebox.showerror(
-                "Startup Task",
-                f"Startup task manager was not found:\n{manager}",
-                parent=self.root,
+            messagebox.showinfo(
+                "Startup Service",
+                f"{prompt}\n\nUse Refresh after authentication completes.",
+                parent=dialog,
             )
-            return False
-        try:
-            import ctypes
 
-            parameters = (
-                f'-NoProfile -ExecutionPolicy Bypass -File "{manager}" '
-                f'-Operation Remove -TaskName "{STARTUP_TASK_NAME}"'
-            )
-            result = ctypes.windll.shell32.ShellExecuteW(
-                None,
-                "runas",
-                "powershell.exe",
-                parameters,
-                str(self.project_root),
-                1,
-            )
-            if result <= 32:
-                raise OSError(f"Windows ShellExecute error {result}")
-        except OSError as exc:
-            messagebox.showerror("Startup Task", str(exc), parent=self.root)
-            return False
+            def refresh_if_open() -> None:
+                if dialog.winfo_exists():
+                    refresh()
 
-        self.auto_start_var.set(False)
-        messagebox.showinfo(
-            "Remove Startup Task",
-            "Accept the administrator prompt to stop and remove the Windows startup task.",
-            parent=self.root,
-        )
-        return True
+            dialog.after(2500, refresh_if_open)
+
+        task_tree.bind("<<TreeviewSelect>>", update_selection)
+        stop_button.configure(command=lambda: run_operation("stop"))
+        remove_button.configure(command=lambda: run_operation("remove"))
+        refresh_button.configure(command=refresh)
+        refresh()
 
     def _cancel(self) -> None:
         self.result = None
