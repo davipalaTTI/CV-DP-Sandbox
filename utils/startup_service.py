@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -78,7 +79,12 @@ def launch_startup_install(
             command += " -StartNow"
         parameters = _powershell_encoded_parameters(command)
         try:
+            log_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise OSError(f"Could not reset the startup operation log: {exc}") from exc
+        try:
             _launch_windows_elevated(project_root, parameters)
+            _wait_for_windows_operation(log_path)
         except OSError as exc:
             detail = _read_operation_log(log_path)
             if detail:
@@ -384,44 +390,42 @@ def _query_linux_status(service_name: str = LINUX_SERVICE_NAME) -> Dict:
 
 
 def _launch_windows_elevated(project_root: Path, parameters: str) -> None:
-    encoded_command = parameters.rsplit(" ", 1)[-1]
-    launcher = (
-        "$ErrorActionPreference='Stop'; "
-        "$process = Start-Process -FilePath 'powershell.exe' -Verb RunAs "
-        "-WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy',"
-        f"'Bypass','-EncodedCommand','{encoded_command}') -Wait -PassThru; "
-        "exit $process.ExitCode"
+    import ctypes
+
+    result = ctypes.windll.shell32.ShellExecuteW(
+        None,
+        "runas",
+        "powershell.exe",
+        parameters,
+        str(project_root),
+        0,
     )
-    kwargs = {}
-    if hasattr(subprocess, "CREATE_NO_WINDOW"):
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    try:
-        completed = subprocess.run(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                launcher,
-            ],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=180,
-            **kwargs,
-        )
-    except subprocess.TimeoutExpired as exc:
+    if result <= 32:
         raise OSError(
-            "The Windows administrator operation timed out. Complete the UAC prompt "
-            "and try Install / Repair again."
-        ) from exc
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip()
-        raise OSError(
-            detail
-            or "The Windows administrator operation was canceled or failed."
+            f"Windows administrator operation was canceled or could not start "
+            f"(ShellExecute error {result})."
         )
+
+
+def _wait_for_windows_operation(log_path: Path, timeout_seconds: float = 180.0) -> None:
+    """Wait for the elevated installer result without accessing its process handle."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        detail = _read_operation_log(log_path)
+        status = ""
+        for line in detail.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip().casefold() == "status":
+                status = value.strip().upper()
+        if status == "SUCCESS":
+            return
+        if status == "FAILED":
+            raise OSError("The elevated Windows startup installer failed.")
+        time.sleep(0.25)
+    raise OSError(
+        "The Windows startup installer did not report completion within three "
+        f"minutes. Check the administrator prompt and operation log: {log_path}"
+    )
 
 
 def _read_operation_log(log_path: Path, max_characters: int = 4000) -> str:
