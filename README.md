@@ -183,9 +183,27 @@ The deployment editor supports both first-time and existing cameras:
   line and zone drawing workflow. When setup is complete, the config is saved and
   the deployment list returns so the next source can be created.
 - **Add Saved Config** adds a camera whose setup was completed previously.
-- **Edit** changes the deployment name, exported **Video Source ID**, days, and
-  operating hours. The same ID is written to the `video_source` column for every
-  record produced by that camera.
+- **Edit Source Settings** reopens a selected camera's model, input, output, and
+  processing settings without discarding its saved lines or zones.
+- **Edit Deployment** changes the schedule, enabled state, source ID, and the
+  per-camera live-footage policy.
+
+Each camera has an independent live-footage policy: **Off** writes no recordings,
+**Keep indefinitely** preserves all recordings, and **Delete after** removes files
+older than the selected number of days. Automatic cleanup only operates inside
+that camera output folder's `live_footage` directory. It runs when a direct camera
+starts and at hourly rollover, and the deployment scheduler also checks every 15
+minutes, including outside camera operating hours. The **Video Source ID** is
+written to the `video_source` column for every record produced by that camera.
+
+Footage recording defaults to **off** for new source configs and new example
+deployments. When it is off, live cameras do not create or write MP4 files under
+`live_footage`, and file/folder inputs do not create processed output videos.
+Counts, event exports, logs, crash reports, heatmaps, and API uploads continue.
+Selecting **Off** does not delete existing footage; select **Delete after** to
+apply automatic retention. Older deployment manifests without `save_footage`
+inherit their saved source config's `save_video` value. A missing
+`footage_retention_days` value means keep indefinitely for backward compatibility.
 
 Each camera must use a different output folder. The editor shows that folder in the
 camera list and rejects duplicates before drawing or adding the camera. Segment
@@ -196,15 +214,22 @@ boot** enabled. On Jetson/Linux, leave **Start at device boot** enabled. Saving
 opens the platform's administrator authentication prompt and installs the boot
 task or service.
 
-To manage an existing schedule, load its deployment manifest and use **Edit** to
-change days, hours, or the source's **Enabled** setting. Saving the same manifest
-causes a running supervisor to reload it within `poll_seconds` and gracefully
-restart the managed camera processes with the new schedule. Use **Manage Startup
-Tasks** on Windows or **Manage Startup Services** on Jetson to list registered
-CV-DP schedulers, including renamed or legacy Windows tasks identified by their
-registered runner action. **Stop Running** ends the current scheduler but keeps its
-startup registration. **Remove Schedule** stops and unregisters it without deleting
-the deployment manifest, camera configs, or output data.
+To manage an existing schedule, load its deployment manifest and use **Edit
+Deployment** to change days, hours, footage policy, or the source's **Enabled**
+setting. Saving the same manifest causes a running supervisor to reload it within
+`poll_seconds` and gracefully restart the managed camera processes with the new
+setting. Use **Manage Startup Tasks** on Windows or **Manage Startup Services** on
+Jetson to list registered CV-DP schedulers and the deployment currently selected
+in the editor. Broken systemd units remain visible with their full load error.
+**Edit Schedule** loads the selected manifest, **Install / Repair** rebuilds and
+starts its boot registration, and **Stop Running** ends only the current run.
+**Remove From Startup** stops and unregisters it while keeping the editable
+deployment manifest, camera configs, and output data.
+
+Deployment manifests persist the desired registration under `startup`, including
+`enabled`, `windows_task_name`, and `linux_service_name`. This lets the manager
+show a configured schedule even when Task Scheduler or systemd registration is
+missing.
 
 1. Run `python main.py` and select the deployment run-mode options.
 2. Use **Create Source** for each new setup, choosing a unique output folder during
@@ -258,13 +283,21 @@ equivalent is:
 ```bash
 sudo bash scripts/install_linux_startup_service.sh \
   --manifest "$(realpath deployment.json)" \
-  --python-executable "$PWD/.venv/bin/python"
+  --python-executable "$PWD/.venv/bin/python" \
+  --start-now
 ```
+
+The installer runs `systemd-analyze verify`, reloads systemd, confirms
+`LoadState=loaded`, enables the service for future boots, and optionally starts it
+immediately. To repair an existing `Loaded: bad-setting` service, use **Install /
+Repair** or rerun the command above. GUI operation output is written to
+`logs/startup_service_operation.log`.
 
 Inspect or remove the Jetson service with:
 
 ```bash
-systemctl status cv-dp-camera-scheduler.service --no-pager
+systemctl status cv-dp-camera-scheduler.service --no-pager --full
+systemctl is-enabled cv-dp-camera-scheduler.service
 journalctl -u cv-dp-camera-scheduler.service -f
 sudo bash scripts/manage_linux_startup_service.sh --operation remove
 ```
@@ -368,7 +401,7 @@ When you run `python main.py`, the configuration dialog appears:
 | Option | Description | Default |
 |--------|-------------|---------|
 | **Enable Zone Counters** | Activate zone-based occupancy counting | Off |
-| **Save Video Output** | Record processed video with overlays | On |
+| **Save footage recordings** | Record processed MP4 footage with overlays | Off |
 | **Enable Heatmap Overlay** | Generate occupancy heatmaps | Off |
 | **Confidence** | Detection confidence threshold (0.1-0.9) | 0.45 |
 | **Device** | Processing device: auto/cpu/cuda/mps | auto |
@@ -673,7 +706,8 @@ The configuration file is automatically saved and contains all settings:
   "input_type": "folder",
   "is_camera": false,
   "enable_zones": true,
-  "save_video": true,
+  "save_video": false,
+  "footage_retention_days": 0,
   "playback_speed_multiplier": 1.0,
   "frame_skip": 2,
   "interpolate_tracks": true,

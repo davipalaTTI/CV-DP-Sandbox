@@ -514,6 +514,9 @@ class VideoWorker:
 
     def _initialize_video_writer(self):
         """Initialize video writer for output"""
+        if not bool(getattr(self.config, "save_video", False)):
+            self.video_writer = None
+            return
         try:
             width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))

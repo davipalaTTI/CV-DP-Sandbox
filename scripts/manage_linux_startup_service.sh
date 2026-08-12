@@ -10,6 +10,10 @@ while [[ $# -gt 0 ]]; do
             OPERATION="${2:-}"
             shift 2
             ;;
+        --service-name)
+            SERVICE_NAME="${2:-}"
+            shift 2
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 2
@@ -17,9 +21,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ ! "$SERVICE_NAME" =~ ^cv-dp[A-Za-z0-9_.@-]*\.service$ ]]; then
+    echo "Refusing to manage a non-CV-DP systemd service: $SERVICE_NAME" >&2
+    exit 2
+fi
+
 case "$OPERATION" in
     status)
-        systemctl status "$SERVICE_NAME" --no-pager
+        systemctl status "$SERVICE_NAME" --no-pager --full
         ;;
     stop)
         if [[ $EUID -ne 0 ]]; then

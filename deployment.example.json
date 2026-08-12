@@ -3,12 +3,19 @@
   "restart_delay_seconds": 15,
   "shutdown_grace_seconds": 30,
   "debug": false,
+  "startup": {
+    "enabled": true,
+    "windows_task_name": "CV-DP Camera Scheduler",
+    "linux_service_name": "cv-dp-camera-scheduler.service"
+  },
   "cameras": [
     {
       "name": "north_gate",
       "config": "camera_outputs/north_gate/config.json",
       "log_file": "camera_outputs/north_gate/north_gate.log",
       "enabled": true,
+      "save_footage": false,
+      "footage_retention_days": 0,
       "schedule": {
         "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
         "start": "07:00",
@@ -20,6 +27,8 @@
       "config": "camera_outputs/south_gate/config.json",
       "log_file": "camera_outputs/south_gate/south_gate.log",
       "enabled": true,
+      "save_footage": true,
+      "footage_retention_days": 2,
       "schedule": {
         "days": ["mon", "tue", "wed", "thu", "fri"],
         "start": "07:00",

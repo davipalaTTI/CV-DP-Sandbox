@@ -22,23 +22,40 @@ function Get-TaskManifest {
             }
         }
     }
+    $Description = [string]$Task.Description
+    if ($Description -match '(?i)(?:^|\|\s*)Manifest=(.+)$') {
+        return $Matches[1].Trim()
+    }
     return ""
 }
 
 function Convert-TaskStatus {
     param([object]$Task)
 
-    $TaskInfo = Get-ScheduledTaskInfo -TaskName $Task.TaskName -TaskPath $Task.TaskPath
+    $TaskInfo = $null
+    try {
+        $TaskInfo = Get-ScheduledTaskInfo `
+            -TaskName $Task.TaskName `
+            -TaskPath $Task.TaskPath `
+            -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Could not read run history for $($Task.TaskPath)$($Task.TaskName): $($_.Exception.Message)"
+    }
     $TaskAction = @($Task.Actions)[0]
     $LastRunTime = ""
     if (
+        $null -ne $TaskInfo -and
         $TaskInfo.LastTaskResult -ne 267011 -and
         $null -ne $TaskInfo.LastRunTime -and
         $TaskInfo.LastRunTime.Year -gt 1900
     ) {
         $LastRunTime = $TaskInfo.LastRunTime.ToString("yyyy-MM-dd HH:mm:ss")
     }
-    $LastResult = if ($TaskInfo.LastTaskResult -eq 267011) {
+    $LastResult = if ($null -eq $TaskInfo) {
+        "Unavailable"
+    }
+    elseif ($TaskInfo.LastTaskResult -eq 267011) {
         "Never run"
     }
     elseif ($TaskInfo.LastTaskResult -eq 0) {
@@ -49,6 +66,7 @@ function Convert-TaskStatus {
     }
     return [ordered]@{
         installed = $true
+        registered = $true
         task_name = [string]$Task.TaskName
         task_path = [string]$Task.TaskPath
         state = [string]$Task.State
@@ -66,8 +84,18 @@ function Get-CVDPTasks {
         $ActionText = (@($Task.Actions) | ForEach-Object {
             "{0} {1}" -f ([string]$_.Execute), ([string]$_.Arguments)
         }) -join " "
-        $Task.TaskName -eq "CV-DP Camera Scheduler" -or
-        ($ActionText -match '(?i)scheduled_runner\.py' -and $ActionText -match '(?i)--manifest(?:\s|=)')
+        $Description = [string]$Task.Description
+        $DefaultName = $Task.TaskName -eq "CV-DP Camera Scheduler"
+        $OwnedDescription = $Description -match '(?i)^CV-DP scheduled camera supervisor'
+        $OwnedAction = (
+            $ActionText -match '(?i)(?:scheduled_runner\.py|CV-DP-Sandbox)' -and
+            $ActionText -match '(?i)--manifest(?:\s|=)'
+        )
+        $LegacyNameAndManifest = (
+            $Task.TaskName -match '(?i)^CV[-_ ]?DP(?:[-_ ]|$)' -and
+            $ActionText -match '(?i)(?:--manifest|deployment\.(?:json|ya?ml))'
+        )
+        $DefaultName -or $OwnedDescription -or $OwnedAction -or $LegacyNameAndManifest
     })
 }
 
@@ -129,6 +157,7 @@ if ($Operation -eq "Status") {
     if ($null -eq $Task) {
         [ordered]@{
             installed = $false
+            registered = $false
             task_name = $TaskName
             task_path = $TaskPath
             state = "Not installed"

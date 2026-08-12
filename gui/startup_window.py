@@ -20,6 +20,14 @@ from config_manager import (
     save_app_config,
 )
 from utils.network import get_available_axis_cameras
+from utils.footage_retention import (
+    POLICY_DELETE,
+    POLICY_OFF,
+    POLICY_OPTIONS,
+    policy_to_settings,
+    settings_to_policy,
+    validate_retention_days,
+)
 from utils.video_utils import load_source_preview
 
 
@@ -90,6 +98,9 @@ class StartupWindow:
         new_camera_callback: Optional[
             Callable[[Set[str], tk.Misc], Optional[str]]
         ] = None,
+        edit_camera_callback: Optional[
+            Callable[[str, Set[str], tk.Misc], Optional[str]]
+        ] = None,
     ) -> Optional[Union[AppConfig, DeploymentRequest]]:
         """
         Get initial configuration from user through GUI
@@ -109,6 +120,7 @@ class StartupWindow:
                     schedule_enabled=schedule_enabled,
                     multiple_cameras=multiple_cameras,
                     new_camera_callback=new_camera_callback,
+                    edit_camera_callback=edit_camera_callback,
                 ).show()
             self._ensure_source_discovery()
             return self._show_initial_config_dialog()
@@ -126,6 +138,20 @@ class StartupWindow:
         return self._show_initial_config_dialog(
             parent=parent,
             reserved_output_folders=reserved_output_folders,
+        )
+
+    def get_edit_source_config(
+        self,
+        parent: tk.Misc,
+        config_path: str,
+        reserved_output_folders: Optional[Set[str]] = None,
+    ) -> Optional[AppConfig]:
+        """Open all source settings with an existing config preloaded."""
+        self._ensure_source_discovery()
+        return self._show_initial_config_dialog(
+            parent=parent,
+            reserved_output_folders=reserved_output_folders,
+            initial_config_path=config_path,
         )
 
     def get_source_preview(
@@ -292,6 +318,7 @@ class StartupWindow:
         self,
         parent: Optional[tk.Misc] = None,
         reserved_output_folders: Optional[Set[str]] = None,
+        initial_config_path: Optional[str] = None,
     ) -> Optional[AppConfig]:
         """Show the initial configuration dialog"""
         owns_root = parent is None
@@ -356,7 +383,8 @@ class StartupWindow:
             'output_folder': tk.StringVar(),
             'enable_zones': tk.BooleanVar(value=False),
             'enable_heatmap': tk.BooleanVar(value=False),
-            'save_video': tk.BooleanVar(value=True),
+            'footage_policy': tk.StringVar(value=POLICY_OFF),
+            'footage_retention_days': tk.StringVar(value="2"),
             'confidence': tk.DoubleVar(value=0.45),
             'segment_seconds': tk.IntVar(value=60),
             'device': tk.StringVar(value="auto"),
@@ -390,6 +418,7 @@ class StartupWindow:
         align_var = tk.BooleanVar(value=True)  # align to :00/:15/:30/:45
 
         result_config = None
+        loaded_template = None
 
         def close_dialog() -> None:
             if owns_root:
@@ -565,15 +594,25 @@ class StartupWindow:
                 messagebox.showerror("Error", "Meters per pixel must be > 0 for mps / kmh / mph.", parent=root)
                 return
 
+            try:
+                save_video, retention_days = policy_to_settings(
+                    config_vars['footage_policy'].get(),
+                    config_vars['footage_retention_days'].get(),
+                )
+            except ValueError as exc:
+                messagebox.showerror("Footage Retention", str(exc), parent=root)
+                return
+
             # Create configuration
-            result_config = AppConfig(
+            submitted_config = AppConfig(
                 model_path=config_vars['model_path'].get(),
                 input_source=source,
                 input_type=input_type_enum,
                 is_camera=is_camera,
                 output_folder=str(output_path),
                 enable_zones=config_vars['enable_zones'].get(),
-                save_video=config_vars['save_video'].get(),
+                save_video=save_video,
+                footage_retention_days=retention_days,
                 confidence_threshold=config_vars['confidence'].get(),
                 segment_seconds=config_vars['segment_seconds'].get(),
                 enable_heatmap=bool(config_vars['enable_heatmap'].get()),
@@ -603,6 +642,32 @@ class StartupWindow:
                 # --- API data upload param ---
                 enable_api_upload=cloud_db_vars['enable_api_upload'].get(),
             )
+
+            if loaded_template is None:
+                result_config = submitted_config
+            else:
+                editable_fields = (
+                    "model_path", "input_source", "input_type", "is_camera",
+                    "output_folder", "enable_zones", "save_video",
+                    "footage_retention_days", "confidence_threshold",
+                    "segment_seconds", "enable_heatmap", "segment_split_minutes",
+                    "align_segments_to_clock", "device", "enable_speed",
+                    "speed_units", "meters_per_pixel", "speed_smooth_window",
+                    "annotate_speed", "frame_skip", "interpolate_tracks",
+                    "show_live_video", "source_name", "max_parallel_videos",
+                    "training_mode", "training_interval_seconds",
+                    "training_output_folder", "training_max_captures",
+                    "training_auto_stop_hours", "training_min_confidence",
+                    "training_include_empty", "training_augment",
+                    "enable_api_upload",
+                )
+                for field_name in editable_fields:
+                    setattr(
+                        loaded_template,
+                        field_name,
+                        getattr(submitted_config, field_name),
+                    )
+                result_config = loaded_template
 
             close_dialog()
 
@@ -703,16 +768,42 @@ class StartupWindow:
                                                                                                       column=0,
                                                                                                       sticky="w",
                                                                                                       padx=5)
-        tk.Checkbutton(options_frame, text="Save Video", variable=config_vars['save_video']).grid(row=0, column=1,
-                                                                                                  sticky="w",
-                                                                                                  padx=5)
         tk.Checkbutton(options_frame, text="Heatmap", variable=config_vars['enable_heatmap']).grid(row=0, column=2,
                                                                                                    sticky="w",
                                                                                                    padx=5)
         row += 1
+        footage_frame = tk.Frame(options_frame)
+        footage_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=5, pady=(5, 0))
+        tk.Label(footage_frame, text="Live footage:").pack(side="left")
+        footage_policy_combo = ttk.Combobox(
+            footage_frame,
+            textvariable=config_vars['footage_policy'],
+            values=POLICY_OPTIONS,
+            state="readonly",
+            width=17,
+        )
+        footage_policy_combo.pack(side="left", padx=(6, 12))
+        retention_label = tk.Label(footage_frame, text="Days:")
+        retention_label.pack(side="left")
+        retention_spinbox = tk.Spinbox(
+            footage_frame,
+            from_=1,
+            to=3650,
+            textvariable=config_vars['footage_retention_days'],
+            width=6,
+        )
+        retention_spinbox.pack(side="left", padx=(6, 0))
+
+        def toggle_retention_days(*_args) -> None:
+            state = "normal" if config_vars['footage_policy'].get() == POLICY_DELETE else "disabled"
+            retention_label.configure(state=state)
+            retention_spinbox.configure(state=state)
+
+        footage_policy_combo.bind("<<ComboboxSelected>>", toggle_retention_days)
+
         # Advanced settings
         advanced_frame = tk.Frame(options_frame)
-        advanced_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
+        advanced_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=5)
 
         tk.Label(advanced_frame, text="Confidence:").grid(row=0, column=0, sticky="w", padx=5)
         confidence_scale = tk.Scale(advanced_frame, from_=0.1, to=0.9, resolution=0.05,
@@ -852,9 +943,13 @@ class StartupWindow:
         row += 1
 
         # Load config function
-        def load_existing_config():
+        def load_existing_config(
+            filename: Optional[str] = None,
+            offer_skip: bool = True,
+            show_confirmation: bool = True,
+        ):
             """Load an existing configuration file"""
-            nonlocal result_config
+            nonlocal result_config, loaded_template
 
             filetypes = [
                 ("Config Files", "*.json *.yaml *.yml"),
@@ -862,11 +957,12 @@ class StartupWindow:
                 ("YAML Files", "*.yaml *.yml"),
                 ("All Files", "*.*")
             ]
-            filename = filedialog.askopenfilename(
-                title="Select Configuration File",
-                filetypes=filetypes,
-                parent=root
-            )
+            if filename is None:
+                filename = filedialog.askopenfilename(
+                    title="Select Configuration File",
+                    filetypes=filetypes,
+                    parent=root
+                )
             if not filename:
                 return
 
@@ -900,9 +996,11 @@ class StartupWindow:
                     if not messagebox.askyesno("Path Validation", error_msg, parent=root):
                         return
 
+                loaded_template = loaded_config
+
                 # Check if config has counting geometry - offer to skip setup.
                 # A zone-only configuration is valid.
-                if loaded_config.lines_config or loaded_config.zones_config:
+                if offer_skip and (loaded_config.lines_config or loaded_config.zones_config):
                     msg = f"Configuration loaded successfully!\n\n"
                     msg += f"• {len(loaded_config.lines_config)} counting line(s)\n"
                     msg += f"• {len(loaded_config.zones_config)} zone(s)\n"
@@ -923,7 +1021,12 @@ class StartupWindow:
                 config_vars['output_folder'].set(loaded_config.output_folder)
                 config_vars['enable_zones'].set(loaded_config.enable_zones)
                 config_vars['enable_heatmap'].set(loaded_config.enable_heatmap)
-                config_vars['save_video'].set(loaded_config.save_video)
+                policy, retention_days = settings_to_policy(
+                    loaded_config.save_video,
+                    getattr(loaded_config, "footage_retention_days", 0),
+                )
+                config_vars['footage_policy'].set(policy)
+                config_vars['footage_retention_days'].set(str(retention_days))
                 config_vars['confidence'].set(loaded_config.confidence_threshold)
                 config_vars['device'].set(loaded_config.device)
                 config_vars['enable_speed'].set(loaded_config.enable_speed)
@@ -963,10 +1066,12 @@ class StartupWindow:
 
                 # Update field states
                 toggle_input_fields()
+                toggle_retention_days()
 
-                messagebox.showinfo("Config Loaded",
-                                    "Configuration loaded. Review/modify settings and click Continue.",
-                                    parent=root)
+                if show_confirmation:
+                    messagebox.showinfo("Config Loaded",
+                                        "Configuration loaded. Review/modify settings and click Continue.",
+                                        parent=root)
 
             except Exception as e:
                 self.logger.error(f"Error loading config: {e}")
@@ -992,6 +1097,13 @@ class StartupWindow:
 
         scrollable_frame.columnconfigure(1, weight=1)
         toggle_input_fields()
+        toggle_retention_days()
+        if initial_config_path:
+            load_existing_config(
+                initial_config_path,
+                offer_skip=False,
+                show_confirmation=False,
+            )
 
         # so the window is centered correctly once all widgets are drawn.
         self.center_window(root)
@@ -1112,6 +1224,9 @@ class StartupWindow:
 
     def _dict_to_config(self, config_dict: Dict) -> AppConfig:
         """Convert dictionary to AppConfig"""
+        config_dict["footage_retention_days"] = validate_retention_days(
+            config_dict.get("footage_retention_days", 0)
+        )
         # Handle enum conversion
         if 'input_type' in config_dict:
             config_dict['input_type'] = InputType(config_dict['input_type'])
@@ -1197,7 +1312,8 @@ class StartupWindow:
             confidence_threshold=0.45,
             device="auto",
             enable_zones=False,
-            save_video=True,
+            save_video=False,
+            footage_retention_days=0,
             segment_seconds=60,
             # heatmap defaults …
             enable_heatmap=False,

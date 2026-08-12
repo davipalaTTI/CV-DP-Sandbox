@@ -30,7 +30,8 @@ DEFAULT_CONFIG = {
     'max_track_age': 30.0,
     'display_width': 1280,
     'display_height': 720,
-    'save_video': True,
+    'save_video': False,
+    'footage_retention_days': 0,
     'enable_zones': False
 }
 

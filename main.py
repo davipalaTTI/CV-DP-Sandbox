@@ -56,6 +56,8 @@ class Application:
         skip_gui: bool = False,
         headless: bool = False,
         source_name: Optional[str] = None,
+        save_footage: Optional[bool] = None,
+        footage_retention_days: Optional[int] = None,
         stop_at: Optional[datetime] = None,
         window_index: int = 0,
         window_count: int = 1,
@@ -106,6 +108,20 @@ class Application:
                 self.config.runtime_window_count = max(1, int(window_count))
                 if source_name:
                     self.config.source_name = source_name.strip()
+                if save_footage is not None:
+                    self.config.save_video = bool(save_footage)
+                    self.logger.info(
+                        "Footage recording overridden by runtime: %s",
+                        "enabled" if save_footage else "disabled",
+                    )
+                if footage_retention_days is not None:
+                    self.config.footage_retention_days = max(
+                        0, int(footage_retention_days)
+                    )
+                    self.logger.info(
+                        "Footage retention overridden by runtime: %d day(s)",
+                        self.config.footage_retention_days,
+                    )
 
                 self.logger.info("Configuration loaded from file successfully")
 
@@ -155,7 +171,13 @@ class Application:
                 startup_selection = config_manager.get_initial_config(
                     new_camera_callback=lambda reserved_outputs, parent: self._create_source_config(
                         config_manager, parent, reserved_outputs
-                    )
+                    ),
+                    edit_camera_callback=lambda config_path, reserved_outputs, parent: self._edit_source_config(
+                        config_manager,
+                        parent,
+                        config_path,
+                        reserved_outputs,
+                    ),
                 )
 
                 if startup_selection is None:
@@ -365,6 +387,32 @@ class Application:
             except Exception:
                 pass
 
+    def _edit_source_config(
+        self,
+        config_manager: StartupWindow,
+        parent,
+        config_path: str,
+        reserved_output_folders: Optional[Set[str]] = None,
+    ) -> Optional[str]:
+        """Edit source settings while preserving its saved counting geometry."""
+        config = config_manager.get_edit_source_config(
+            parent,
+            config_path,
+            reserved_output_folders,
+        )
+        if config is None:
+            return None
+        updated_path = Path(config.output_folder) / "config.json"
+        if not config_manager.save_config(config, updated_path):
+            messagebox.showerror(
+                "Source Not Saved",
+                f"The source configuration could not be saved to:\n{updated_path}",
+                parent=parent,
+            )
+            return None
+        self.logger.info("Source config updated: %s", updated_path)
+        return str(updated_path.resolve())
+
     def run(self) -> int:
         """
         Run the main processing loop
@@ -429,6 +477,8 @@ def main(
     debug: bool = False,
     log_file: str = None,
     source_name: str = None,
+    save_footage: Optional[bool] = None,
+    footage_retention_days: Optional[int] = None,
     stop_at: datetime = None,
     headless: bool = False,
     window_index: int = 0,
@@ -500,6 +550,8 @@ def main(
             skip_gui=skip_gui,
             headless=headless,
             source_name=source_name,
+            save_footage=save_footage,
+            footage_retention_days=footage_retention_days,
             stop_at=stop_at,
             window_index=window_index,
             window_count=window_count,
@@ -551,6 +603,8 @@ if __name__ == "__main__":
             debug=is_debug,
             log_file=log_path,
             source_name=args.source_name,
+            save_footage=args.save_footage,
+            footage_retention_days=args.footage_retention_days,
             stop_at=args.stop_at,
             window_index=args.window_index,
             window_count=args.window_count,
@@ -566,6 +620,8 @@ if __name__ == "__main__":
             debug=is_debug,
             log_file=log_path,
             source_name=args.source_name,
+            save_footage=args.save_footage,
+            footage_retention_days=args.footage_retention_days,
             stop_at=args.stop_at,
             window_index=args.window_index,
             window_count=args.window_count,
@@ -580,6 +636,8 @@ if __name__ == "__main__":
             debug=is_debug,
             log_file=log_path,
             source_name=args.source_name,
+            save_footage=args.save_footage,
+            footage_retention_days=args.footage_retention_days,
             stop_at=args.stop_at,
             window_index=args.window_index,
             window_count=args.window_count,

@@ -12,6 +12,16 @@ def _parse_datetime(value: str) -> datetime:
         ) from exc
 
 
+def _parse_retention_days(value: str) -> int:
+    try:
+        days = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a whole number of days") from exc
+    if days < 0:
+        raise argparse.ArgumentTypeError("cannot be negative")
+    return days
+
+
 def parse_arguments(argv=None):
     """Parse command line arguments"""
 
@@ -46,6 +56,25 @@ Examples:
         "--source-name",
         type=str,
         help="Override the source name written to event exports"
+    )
+    footage_group = parser.add_mutually_exclusive_group()
+    footage_group.add_argument(
+        "--save-footage",
+        dest="save_footage",
+        action="store_true",
+        help="Override the source config and save annotated footage",
+    )
+    footage_group.add_argument(
+        "--no-save-footage",
+        dest="save_footage",
+        action="store_false",
+        help="Override the source config and disable all footage recording",
+    )
+    parser.set_defaults(save_footage=None)
+    parser.add_argument(
+        "--footage-retention-days",
+        type=_parse_retention_days,
+        help="Override live-footage retention (0 keeps recordings indefinitely)",
     )
     parser.add_argument(
         "--stop-at",

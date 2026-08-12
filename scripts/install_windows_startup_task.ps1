@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Manifest,
     [string]$TaskName = "CV-DP Camera Scheduler",
-    [string]$PythonExecutable = ""
+    [string]$PythonExecutable = "",
+    [switch]$StartNow
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +40,7 @@ $Principal = New-ScheduledTaskPrincipal `
 
 Register-ScheduledTask `
     -TaskName $TaskName `
+    -Description "CV-DP scheduled camera supervisor | Manifest=$ManifestPath" `
     -Action $Action `
     -Trigger $Trigger `
     -Settings $Settings `
@@ -49,7 +51,13 @@ $RegisteredTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
 if ($RegisteredTask.TaskName -ne $TaskName) {
     throw "Windows did not register startup task: $TaskName"
 }
+if ($StartNow) {
+    Start-ScheduledTask -TaskName $TaskName
+}
 
 Write-Host "Installed startup task: $TaskName"
 Write-Host "Manifest: $ManifestPath"
+if ($StartNow) {
+    Write-Host "The scheduler task was started."
+}
 Write-Host "The scheduler will start at every boot, including boots inside an active window."

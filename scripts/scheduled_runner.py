@@ -26,6 +26,7 @@ from deployment_manager import (
     ManifestError,
     load_deployment,
 )
+from utils.footage_retention import cleanup_live_footage, footage_policy_label
 
 LOGGER = logging.getLogger("camera_scheduler")
 
@@ -68,6 +69,10 @@ class ManagedCamera:
             "--crash-report-dir",
             str(self.job.log_path.parent / "crash_reports"),
         ]
+        command.append("--save-footage" if self.job.save_footage else "--no-save-footage")
+        command.extend(
+            ["--footage-retention-days", str(self.job.footage_retention_days)]
+        )
         if self.headless:
             command.append("--headless")
         if window_end is not None:
@@ -89,10 +94,13 @@ class ManagedCamera:
         self.stop_signal_sent = False
         stop_label = window_end.isoformat(timespec="seconds") if window_end else "continuous"
         LOGGER.info(
-            "Started camera %s (pid=%s, scheduled stop=%s)",
+            "Started camera %s (pid=%s, scheduled stop=%s, footage=%s)",
             self.job.name,
             self.process.pid,
             stop_label,
+            footage_policy_label(
+                self.job.save_footage, self.job.footage_retention_days
+            ),
         )
 
     def observe_exit(
@@ -185,6 +193,7 @@ class ScheduleSupervisor:
         self._manifest_file_signature = self._read_manifest_signature()
         self.cameras = self._build_cameras(deployment)
         self.stop_requested = False
+        self._last_retention_cleanup = 0.0
 
     def _build_cameras(self, deployment: Deployment) -> List[ManagedCamera]:
         window_count = max(1, len(deployment.jobs))
@@ -225,6 +234,7 @@ class ScheduleSupervisor:
         self.shutdown()
         self.deployment = deployment
         self.cameras = self._build_cameras(deployment)
+        self._last_retention_cleanup = 0.0
         self._manifest_file_signature = self._read_manifest_signature()
         LOGGER.info("Reloaded deployment with %d camera(s)", len(self.cameras))
         return True
@@ -276,6 +286,28 @@ class ScheduleSupervisor:
         if elapsed >= self.deployment.shutdown_grace_seconds:
             camera.force_stop()
 
+    def _cleanup_expired_footage(self, force: bool = False) -> None:
+        current = time.monotonic()
+        if not force and current - self._last_retention_cleanup < 15 * 60:
+            return
+        self._last_retention_cleanup = current
+        for job in self.deployment.jobs:
+            if not job.save_footage or job.footage_retention_days <= 0:
+                continue
+            result = cleanup_live_footage(
+                job.output_folder,
+                job.footage_retention_days,
+                logger=LOGGER,
+            )
+            if result.deleted_files or result.errors:
+                LOGGER.info(
+                    "Camera %s footage cleanup: deleted=%d, freed=%.1f MB, errors=%d",
+                    job.name,
+                    result.deleted_files,
+                    result.freed_bytes / (1024 * 1024),
+                    result.errors,
+                )
+
     def shutdown(self) -> None:
         running = [camera for camera in self.cameras if camera.process is not None]
         for camera in running:
@@ -304,12 +336,14 @@ class ScheduleSupervisor:
             signal.signal(signal.SIGBREAK, self._handle_signal)
 
         LOGGER.info("Scheduler started with %d camera(s)", len(self.cameras))
+        self._cleanup_expired_footage(force=True)
         try:
             while not self.stop_requested:
                 if self._consume_external_stop_request():
                     self.stop_requested = True
                     break
                 self._reload_if_changed()
+                self._cleanup_expired_footage()
                 now = datetime.now()
                 for camera in self.cameras:
                     self._sync_camera(camera, now)
@@ -364,6 +398,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     _configure_logging(deployment.project_root / "logs" / "scheduler.log", deployment.debug)
     LOGGER.info("Validated deployment manifest: %s", Path(args.manifest).resolve())
+    for job in deployment.jobs:
+        LOGGER.info(
+            "Camera %s: enabled=%s, footage=%s",
+            job.name,
+            job.enabled,
+            footage_policy_label(job.save_footage, job.footage_retention_days),
+        )
     if args.check:
         return 0
     return ScheduleSupervisor(

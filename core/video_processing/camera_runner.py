@@ -19,6 +19,7 @@ from core.detection_engine import DetectionEngine
 from core.tracking import ObjectCounter, CountingEvent
 from core.training_mode import TrainingModeCapture, TrainingConfig
 from utils.results_export import ResultsExporter, ExportConfig, get_master_log_writer
+from utils.footage_retention import cleanup_live_footage, footage_policy_label
 
 from .stats import ProcessingStats
 from .async_io import (
@@ -39,6 +40,15 @@ class CameraRunner:
         self.config = config
         self.detection_engine = detection_engine
         self.logger = logging.getLogger(__name__)
+        self.config.save_video = bool(getattr(config, "save_video", False))
+        self.footage_retention_days = max(
+            0, int(getattr(config, "footage_retention_days", 0))
+        )
+        self.config.footage_retention_days = self.footage_retention_days
+        self.logger.info(
+            "Footage recording policy: %s",
+            footage_policy_label(self.config.save_video, self.footage_retention_days),
+        )
 
         # Live edit state (for moving lines/zones)
         self.edit_mode = False
@@ -255,6 +265,9 @@ class CameraRunner:
             return False
 
     def _initialize_video_writer(self, filename: Optional[str] = None, frame: Optional[np.ndarray] = None) -> bool:
+        if not self.config.save_video:
+            self.video_writer = None
+            return False
         if not self.cap:
             return False
         try:
@@ -302,6 +315,8 @@ class CameraRunner:
     # --- MAIN PROCESSING LOOP ---
     def run(self) -> Dict:
         self.logger.info("Starting High-Performance camera processing...")
+
+        self._cleanup_expired_footage()
 
         if not self._initialize_camera():
             raise RuntimeError("Failed to initialize camera")
@@ -615,6 +630,8 @@ class CameraRunner:
 
     # --- HELPERS, EXPORTS, & CLEANUP ---
     def _save_video_frame(self, clean_frame: np.ndarray) -> None:
+        if not self.config.save_video:
+            return
         if self.video_writer is None or not self.video_writer.isOpened():
             self._initialize_video_writer(frame=clean_frame)
             if self.video_writer is None:
@@ -667,6 +684,23 @@ class CameraRunner:
 
         if self.config.save_video:
             self._rotate_hourly_video(window_start, window_end)
+            self._cleanup_expired_footage()
+
+    def _cleanup_expired_footage(self) -> None:
+        if not self.config.save_video or self.footage_retention_days <= 0:
+            return
+        result = cleanup_live_footage(
+            self.config.output_folder,
+            self.footage_retention_days,
+            logger=self.logger,
+        )
+        if result.deleted_files or result.errors:
+            self.logger.info(
+                "Live footage cleanup: deleted=%d, freed=%.1f MB, errors=%d",
+                result.deleted_files,
+                result.freed_bytes / (1024 * 1024),
+                result.errors,
+            )
 
     def _export_hourly_segment(self, window_start: datetime, window_end: datetime):
         try:

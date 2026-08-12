@@ -74,7 +74,8 @@ class AppConfig:
     input_type: InputType = InputType.FOLDER
     is_camera: bool = False
     enable_zones: bool = False
-    save_video: bool = True
+    save_video: bool = False
+    footage_retention_days: int = 0  # 0 keeps saved live footage indefinitely
     segment_seconds: int = 60
     display_width: int = 1280
     display_height: int = 720

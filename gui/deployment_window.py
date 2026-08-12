@@ -8,7 +8,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -17,9 +17,19 @@ from deployment_manager import (
     ManifestError,
     load_deployment,
     read_document,
+    set_startup_enabled,
     validate_source_config,
 )
+from utils.footage_retention import (
+    POLICY_DELETE,
+    POLICY_OPTIONS,
+    footage_policy_label,
+    policy_to_settings,
+    settings_to_policy,
+)
 from utils.startup_service import (
+    LINUX_SERVICE_NAME,
+    WINDOWS_TASK_NAME,
     launch_startup_install,
     launch_startup_remove,
     launch_startup_stop,
@@ -49,6 +59,21 @@ def configured_video_source(config_path: str) -> str:
     return str(value).strip()
 
 
+def configured_footage_policy(config_path: str) -> Tuple[bool, int]:
+    """Read source-level footage settings for manifest defaults."""
+    try:
+        document = read_document(Path(config_path).expanduser())
+    except ManifestError:
+        return False, 0
+    save_footage = document.get("save_video", True)
+    if not isinstance(save_footage, bool):
+        save_footage = False
+    retention_days = document.get("footage_retention_days", 0)
+    if isinstance(retention_days, bool) or not isinstance(retention_days, int):
+        retention_days = 0
+    return save_footage, max(0, retention_days)
+
+
 class DeploymentWindow:
     """Create and edit a deployment manifest from saved camera configs."""
 
@@ -59,12 +84,18 @@ class DeploymentWindow:
         new_camera_callback: Optional[
             Callable[[Set[str], tk.Misc], Optional[str]]
         ] = None,
+        edit_camera_callback: Optional[
+            Callable[[str, Set[str], tk.Misc], Optional[str]]
+        ] = None,
     ):
         self.project_root = Path(__file__).resolve().parents[1]
         self.initial_schedule_enabled = schedule_enabled
         self.initial_multiple_cameras = multiple_cameras
         self.new_camera_callback = new_camera_callback
+        self.edit_camera_callback = edit_camera_callback
         self.cameras: List[Dict] = []
+        self.windows_task_name = WINDOWS_TASK_NAME
+        self.linux_service_name = LINUX_SERVICE_NAME
         self.result: Optional[DeploymentRequest] = None
         self.root: Optional[tk.Tk] = None
 
@@ -135,7 +166,16 @@ class DeploymentWindow:
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
 
-        columns = ("name", "source_name", "config", "output", "schedule", "days", "enabled")
+        columns = (
+            "name",
+            "source_name",
+            "config",
+            "output",
+            "schedule",
+            "days",
+            "footage",
+            "enabled",
+        )
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
         self.tree.heading("name", text="Deployment Name")
         self.tree.heading("source_name", text="Video Source")
@@ -143,6 +183,7 @@ class DeploymentWindow:
         self.tree.heading("output", text="Output Folder")
         self.tree.heading("schedule", text="Hours")
         self.tree.heading("days", text="Days")
+        self.tree.heading("footage", text="Save Footage")
         self.tree.heading("enabled", text="Enabled")
         self.tree.column("name", width=125, minwidth=100)
         self.tree.column("source_name", width=125, minwidth=100)
@@ -150,6 +191,7 @@ class DeploymentWindow:
         self.tree.column("output", width=225, minwidth=170)
         self.tree.column("schedule", width=125, minwidth=100, anchor="center")
         self.tree.column("days", width=150, minwidth=100, anchor="center")
+        self.tree.column("footage", width=90, minwidth=80, anchor="center", stretch=False)
         self.tree.column("enabled", width=70, minwidth=60, anchor="center", stretch=False)
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.bind("<Double-1>", lambda _event: self._edit_selected())
@@ -169,7 +211,14 @@ class DeploymentWindow:
         self.create_button.pack(side="left")
         self.add_button = ttk.Button(tools, text="Add Saved Config", command=self._add_camera)
         self.add_button.pack(side="left", padx=(8, 0))
-        ttk.Button(tools, text="Edit", command=self._edit_selected).pack(side="left", padx=(8, 0))
+        ttk.Button(tools, text="Edit Deployment", command=self._edit_selected).pack(side="left", padx=(8, 0))
+        self.edit_source_button = ttk.Button(
+            tools,
+            text="Edit Source Settings",
+            command=self._edit_source_settings,
+            state="normal" if self.edit_camera_callback else "disabled",
+        )
+        self.edit_source_button.pack(side="left", padx=(8, 0))
         ttk.Button(tools, text="Remove", command=self._remove_selected).pack(side="left", padx=(8, 0))
         ttk.Label(tools, textvariable=self.status_var).pack(side="right")
 
@@ -216,9 +265,16 @@ class DeploymentWindow:
         )
         if not filename:
             return
+        self._load_manifest_path(Path(filename))
+
+    def _load_manifest_path(self, manifest_path: Path) -> bool:
+        """Load a known deployment manifest into the editor for modification."""
         try:
-            deployment = load_deployment(Path(filename))
+            manifest_path = manifest_path.expanduser().resolve()
+            deployment = load_deployment(manifest_path)
             self.project_root = deployment.project_root
+            self.windows_task_name = deployment.startup.windows_task_name
+            self.linux_service_name = deployment.startup.linux_service_name
             self.cameras = []
             for job in deployment.jobs:
                 schedule = job.schedule
@@ -232,20 +288,28 @@ class DeploymentWindow:
                         ),
                         "log_file": str(job.log_path),
                         "enabled": job.enabled,
+                        "save_footage": job.save_footage,
+                        "footage_retention_days": job.footage_retention_days,
                         "start": schedule.start.strftime("%H:%M") if schedule.start else "07:00",
                         "end": schedule.end.strftime("%H:%M") if schedule.end else "18:30",
                         "days": [key for index, (_label, key) in enumerate(DAY_OPTIONS) if index in schedule.days],
                     }
                 )
-            self.manifest_var.set(filename)
+            self.manifest_var.set(str(manifest_path))
             self.multiple_var.set(len(self.cameras) > 1)
             has_schedule = any(not job.schedule.always for job in deployment.jobs)
             self.schedule_var.set(has_schedule)
-            if startup_service_supported() and has_schedule:
-                self.auto_start_var.set(True)
+            if startup_service_supported():
+                self.auto_start_var.set(
+                    deployment.startup.enabled
+                    if deployment.startup.configured
+                    else has_schedule
+                )
             self._refresh_tree()
+            return True
         except (ManifestError, OSError) as exc:
             messagebox.showerror("Deployment Error", str(exc), parent=self.root)
+            return False
 
     def _add_camera(self) -> None:
         if not self.multiple_var.get() and self.cameras:
@@ -294,6 +358,44 @@ class DeploymentWindow:
         if index is not None:
             self._open_camera_editor(index, self.cameras[index]["config"])
 
+    def _edit_source_settings(self) -> None:
+        index = self._selected_index()
+        if index is None or self.edit_camera_callback is None:
+            return
+        reserved_outputs = {
+            str(Path(camera["output_folder"]).resolve()).casefold()
+            for camera_index, camera in enumerate(self.cameras)
+            if camera_index != index
+        }
+        config_path = self.edit_camera_callback(
+            self.cameras[index]["config"],
+            reserved_outputs,
+            self.root,
+        )
+        if not config_path:
+            return
+        try:
+            output_folder = validate_source_config(
+                Path(config_path).resolve(), self.project_root
+            )
+        except ManifestError as exc:
+            messagebox.showerror("Source Error", str(exc), parent=self.root)
+            return
+        save_footage, retention_days = configured_footage_policy(config_path)
+        self.cameras[index].update(
+            {
+                "config": str(Path(config_path).resolve()),
+                "output_folder": str(output_folder),
+                "source_name": (
+                    configured_video_source(config_path)
+                    or self.cameras[index]["source_name"]
+                ),
+                "save_footage": save_footage,
+                "footage_retention_days": retention_days,
+            }
+        )
+        self._refresh_tree()
+
     def _remove_selected(self) -> None:
         index = self._selected_index()
         if index is not None:
@@ -314,6 +416,13 @@ class DeploymentWindow:
         source_var = tk.StringVar(value=existing["source_name"] if existing else default_source)
         config_var = tk.StringVar(value=config_path)
         enabled_var = tk.BooleanVar(value=existing["enabled"] if existing else True)
+        default_save, default_retention = configured_footage_policy(config_path)
+        policy, retention_days = settings_to_policy(
+            existing["save_footage"] if existing else default_save,
+            existing.get("footage_retention_days", 0) if existing else default_retention,
+        )
+        footage_policy_var = tk.StringVar(value=policy)
+        retention_days_var = tk.StringVar(value=str(retention_days))
         start_var = tk.StringVar(value=existing["start"] if existing else "07:00")
         end_var = tk.StringVar(value=existing["end"] if existing else "18:30")
         selected_days = set(existing["days"] if existing else [key for _label, key in DAY_OPTIONS])
@@ -341,15 +450,49 @@ class DeploymentWindow:
                 source_from_config = configured_video_source(value)
                 if source_from_config:
                     source_var.set(source_from_config)
+                save_footage, retention = configured_footage_policy(value)
+                policy, days = settings_to_policy(save_footage, retention)
+                footage_policy_var.set(policy)
+                retention_days_var.set(str(days))
+                toggle_retention_days()
 
         ttk.Button(body, text="Browse", command=browse_config).grid(row=2, column=2, padx=(8, 0))
         ttk.Checkbutton(body, text="Enabled", variable=enabled_var).grid(
             row=3, column=1, sticky="w", pady=(6, 4)
         )
 
+        footage_frame = ttk.LabelFrame(body, text="Live Footage", padding=8)
+        footage_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        footage_policy_combo = ttk.Combobox(
+            footage_frame,
+            textvariable=footage_policy_var,
+            values=POLICY_OPTIONS,
+            state="readonly",
+            width=17,
+        )
+        footage_policy_combo.grid(row=0, column=0, sticky="w")
+        retention_label = ttk.Label(footage_frame, text="Days:")
+        retention_label.grid(row=0, column=1, padx=(12, 4))
+        retention_spinbox = tk.Spinbox(
+            footage_frame,
+            from_=1,
+            to=3650,
+            textvariable=retention_days_var,
+            width=6,
+        )
+        retention_spinbox.grid(row=0, column=2, sticky="w")
+
+        def toggle_retention_days(*_args) -> None:
+            state = "normal" if footage_policy_var.get() == POLICY_DELETE else "disabled"
+            retention_label.configure(state=state)
+            retention_spinbox.configure(state=state)
+
+        footage_policy_combo.bind("<<ComboboxSelected>>", toggle_retention_days)
+        toggle_retention_days()
+
         if self.schedule_var.get():
             schedule_frame = ttk.LabelFrame(body, text="Operating Schedule", padding=10)
-            schedule_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+            schedule_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 4))
             ttk.Label(schedule_frame, text="Start:").grid(row=0, column=0, sticky="w")
             ttk.Entry(schedule_frame, textvariable=start_var, width=8).grid(row=0, column=1, padx=(4, 16))
             ttk.Label(schedule_frame, text="End:").grid(row=0, column=2, sticky="w")
@@ -415,6 +558,14 @@ class DeploymentWindow:
                     messagebox.showerror("Schedule Error", "Select at least one day and use different start/end times.", parent=dialog)
                     return
 
+            try:
+                save_footage, retention_days = policy_to_settings(
+                    footage_policy_var.get(), retention_days_var.get()
+                )
+            except ValueError as exc:
+                messagebox.showerror("Footage Retention", str(exc), parent=dialog)
+                return
+
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._") or "camera"
             log_file = (
                 existing["log_file"]
@@ -428,6 +579,8 @@ class DeploymentWindow:
                 "output_folder": str(output_folder),
                 "log_file": log_file,
                 "enabled": enabled_var.get(),
+                "save_footage": save_footage,
+                "footage_retention_days": retention_days,
                 "start": start_var.get().strip(),
                 "end": end_var.get().strip(),
                 "days": days,
@@ -440,7 +593,7 @@ class DeploymentWindow:
             dialog.destroy()
 
         buttons = ttk.Frame(body, padding=(0, 12, 0, 0))
-        buttons.grid(row=5, column=0, columnspan=3, sticky="e")
+        buttons.grid(row=6, column=0, columnspan=3, sticky="e")
         ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="left")
         ttk.Button(buttons, text="Apply", command=accept).pack(side="left", padx=(8, 0))
         dialog.bind("<Return>", lambda _event: accept())
@@ -536,6 +689,9 @@ class DeploymentWindow:
                     camera["output_folder"],
                     hours,
                     days,
+                    footage_policy_label(
+                        camera["save_footage"], camera["footage_retention_days"]
+                    ),
                     "Yes" if camera["enabled"] else "No",
                 ),
             )
@@ -569,6 +725,8 @@ class DeploymentWindow:
                     "config": camera["config"],
                     "log_file": camera["log_file"],
                     "enabled": camera["enabled"],
+                    "save_footage": camera["save_footage"],
+                    "footage_retention_days": camera["footage_retention_days"],
                     "schedule": schedule,
                 }
             )
@@ -579,6 +737,11 @@ class DeploymentWindow:
             "restart_delay_seconds": 15,
             "shutdown_grace_seconds": 30,
             "debug": False,
+            "startup": {
+                "enabled": bool(self.auto_start_var.get()),
+                "windows_task_name": self.windows_task_name,
+                "linux_service_name": self.linux_service_name,
+            },
             "cameras": camera_records,
         }
 
@@ -630,6 +793,7 @@ class DeploymentWindow:
             messagebox.showinfo("Deployment Saved", f"Saved to:\n{manifest_path}", parent=self.root)
 
     def _install_startup_service(self) -> None:
+        self.auto_start_var.set(True)
         manifest_path = self._write_manifest()
         if manifest_path is None:
             return
@@ -639,12 +803,18 @@ class DeploymentWindow:
     def _launch_startup_installer(self, manifest_path: Path) -> bool:
         """Open the platform authentication prompt for persistent boot startup."""
         try:
+            set_startup_enabled(manifest_path, True)
             prompt = launch_startup_install(
                 self.project_root,
                 manifest_path,
                 sys.executable,
+                (
+                    self.windows_task_name
+                    if sys.platform == "win32"
+                    else self.linux_service_name
+                ),
             )
-        except OSError as exc:
+        except (ManifestError, OSError) as exc:
             messagebox.showerror("Startup Service", str(exc), parent=self.root)
             return False
 
@@ -681,11 +851,11 @@ class DeploymentWindow:
         task_tree.heading("manifest", text="Deployment Manifest")
         task_tree.heading("last_run", text="Last Run")
         task_tree.heading("result", text="Last Result")
-        task_tree.column("name", width=210, minwidth=150)
-        task_tree.column("state", width=110, minwidth=90, anchor="center")
-        task_tree.column("manifest", width=310, minwidth=180)
-        task_tree.column("last_run", width=150, minwidth=120)
-        task_tree.column("result", width=100, minwidth=80, anchor="center")
+        task_tree.column("name", width=180, minwidth=140)
+        task_tree.column("state", width=150, minwidth=110, anchor="center")
+        task_tree.column("manifest", width=270, minwidth=180)
+        task_tree.column("last_run", width=140, minwidth=120)
+        task_tree.column("result", width=190, minwidth=120)
         task_tree.grid(row=0, column=0, sticky="nsew")
 
         scrollbar = ttk.Scrollbar(outer, orient="vertical", command=task_tree.yview)
@@ -693,7 +863,12 @@ class DeploymentWindow:
         task_tree.configure(yscrollcommand=scrollbar.set)
 
         detail_var = tk.StringVar(value=f"Checking registered startup {service_kind}s...")
-        ttk.Label(outer, textvariable=detail_var).grid(
+        ttk.Label(
+            outer,
+            textvariable=detail_var,
+            justify="left",
+            wraplength=930,
+        ).grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(10, 0)
         )
 
@@ -706,9 +881,13 @@ class DeploymentWindow:
             selection = task_tree.selection()
             return entries.get(selection[0]) if selection else None
 
+        edit_button = ttk.Button(actions, text="Edit Schedule", state="disabled")
+        edit_button.pack(side="left")
+        repair_button = ttk.Button(actions, text="Install / Repair", state="disabled")
+        repair_button.pack(side="left", padx=(8, 0))
         stop_button = ttk.Button(actions, text="Stop Running", state="disabled")
-        stop_button.pack(side="left")
-        remove_button = ttk.Button(actions, text="Remove Schedule", state="disabled")
+        stop_button.pack(side="left", padx=(8, 0))
+        remove_button = ttk.Button(actions, text="Remove From Startup", state="disabled")
         remove_button.pack(side="left", padx=(8, 0))
         refresh_button = ttk.Button(actions, text="Refresh")
         refresh_button.pack(side="left", padx=(8, 0))
@@ -719,22 +898,31 @@ class DeploymentWindow:
         def update_selection(_event=None) -> None:
             entry = selected_entry()
             if entry is None:
+                edit_button.configure(state="disabled")
+                repair_button.configure(state="disabled")
                 stop_button.configure(state="disabled")
                 remove_button.configure(state="disabled")
                 return
             state_text = str(entry.get("state", "Unknown"))
             running = "running" in state_text.lower()
-            stop_button.configure(state="normal" if running else "disabled")
-            remove_button.configure(state="normal")
+            registered = bool(entry.get("registered", entry.get("installed", False)))
             manifest = str(entry.get("manifest", "")) or "Unknown"
-            detail_var.set(f"Manifest: {manifest}")
+            manifest_exists = manifest != "Unknown" and Path(manifest).expanduser().is_file()
+            edit_button.configure(state="normal" if manifest_exists else "disabled")
+            repair_button.configure(state="normal" if manifest_exists else "disabled")
+            stop_button.configure(state="normal" if registered and running else "disabled")
+            remove_button.configure(state="normal" if registered else "disabled")
+            result_text = str(entry.get("last_result", "Unknown")) or "Unknown"
+            detail_var.set(
+                f"State: {state_text}    Result: {result_text}\nManifest: {manifest}"
+            )
 
         def display_results(result_state: Dict, generation: int) -> None:
             if generation != refresh_generation[0] or not dialog.winfo_exists():
                 return
             refresh_button.configure(state="normal")
             error = result_state["error"]
-            if error is not None:
+            if error is not None and not result_state["entries"]:
                 detail_var.set(f"Startup {service_kind} status unavailable")
                 messagebox.showerror("Startup Service", error, parent=dialog)
                 return
@@ -768,7 +956,11 @@ class DeploymentWindow:
                 task_tree.focus(first)
                 update_selection()
             else:
-                detail_var.set(f"No CV-DP startup {service_kind}s are registered.")
+                detail_var.set(
+                    f"No CV-DP startup {service_kind}s or configured deployments were found."
+                )
+                edit_button.configure(state="disabled")
+                repair_button.configure(state="disabled")
                 stop_button.configure(state="disabled")
                 remove_button.configure(state="disabled")
 
@@ -776,16 +968,80 @@ class DeploymentWindow:
             refresh_generation[0] += 1
             generation = refresh_generation[0]
             refresh_button.configure(state="disabled")
+            edit_button.configure(state="disabled")
+            repair_button.configure(state="disabled")
             stop_button.configure(state="disabled")
             remove_button.configure(state="disabled")
             detail_var.set(f"Checking registered startup {service_kind}s...")
             result_state = {"done": False, "entries": [], "error": None}
+            configured_manifest = self.manifest_var.get().strip()
 
             def worker() -> None:
                 try:
-                    result_state["entries"] = query_startup_entries(self.project_root)
-                except Exception as exc:
-                    result_state["error"] = str(exc)
+                    try:
+                        result_state["entries"] = query_startup_entries(self.project_root)
+                    except Exception as exc:
+                        result_state["error"] = str(exc)
+                    if configured_manifest:
+                        manifest_path = Path(configured_manifest).expanduser()
+                        if manifest_path.is_file():
+                            try:
+                                manifest_path = manifest_path.resolve()
+                                deployment = load_deployment(manifest_path)
+                                has_schedule = any(
+                                    not job.schedule.always for job in deployment.jobs
+                                )
+                                desired = (
+                                    deployment.startup.enabled
+                                    if deployment.startup.configured
+                                    else has_schedule
+                                )
+                                should_list = has_schedule or desired
+                                manifest_key = str(manifest_path).casefold()
+                                matched = False
+                                for entry in result_state["entries"]:
+                                    value = str(entry.get("manifest", "")).strip()
+                                    if not value:
+                                        continue
+                                    try:
+                                        value_key = str(
+                                            Path(value).expanduser().resolve()
+                                        ).casefold()
+                                    except OSError:
+                                        value_key = value.casefold()
+                                    if value_key == manifest_key:
+                                        entry["configured"] = True
+                                        matched = True
+                                if should_list and not matched:
+                                    task_name = (
+                                        deployment.startup.windows_task_name
+                                        if sys.platform == "win32"
+                                        else deployment.startup.linux_service_name
+                                    )
+                                    result_state["entries"].append(
+                                        {
+                                            "installed": False,
+                                            "registered": False,
+                                            "configured": True,
+                                            "task_name": task_name,
+                                            "task_path": (
+                                                "\\" if sys.platform == "win32" else ""
+                                            ),
+                                            "state": (
+                                                "Configured; registration missing"
+                                                if desired
+                                                else "Configured; boot disabled"
+                                            ),
+                                            "manifest": str(manifest_path),
+                                            "last_run_time": "",
+                                            "last_result": (
+                                                result_state["error"] or "Not registered"
+                                            ),
+                                        }
+                                    )
+                            except (ManifestError, OSError) as exc:
+                                if result_state["error"] is None:
+                                    result_state["error"] = str(exc)
                 finally:
                     result_state["done"] = True
 
@@ -803,6 +1059,40 @@ class DeploymentWindow:
                 daemon=True,
             ).start()
             dialog.after(100, poll)
+
+        def edit_schedule() -> None:
+            entry = selected_entry()
+            if entry is None:
+                return
+            manifest = Path(str(entry.get("manifest", ""))).expanduser()
+            if self._load_manifest_path(manifest):
+                dialog.destroy()
+
+        def repair_registration() -> None:
+            entry = selected_entry()
+            if entry is None:
+                return
+            manifest = Path(str(entry.get("manifest", ""))).expanduser()
+            try:
+                set_startup_enabled(manifest, True)
+                deployment = load_deployment(manifest)
+                self.auto_start_var.set(True)
+                prompt = launch_startup_install(
+                    deployment.project_root,
+                    manifest.resolve(),
+                    str(deployment.python_executable),
+                    str(entry.get("task_name", "")) or None,
+                    start_now=True,
+                )
+            except (ManifestError, OSError) as exc:
+                messagebox.showerror("Startup Service", str(exc), parent=dialog)
+                return
+            messagebox.showinfo(
+                "Startup Service",
+                f"{prompt}\n\nUse Refresh after authentication completes.",
+                parent=dialog,
+            )
+            dialog.after(2500, lambda: dialog.winfo_exists() and refresh())
 
         def run_operation(operation: str) -> None:
             entry = selected_entry()
@@ -824,8 +1114,9 @@ class DeploymentWindow:
                 )
             else:
                 question = (
-                    f"Stop and remove the schedule {display_name}?\n\n"
-                    "Saved deployment, camera configs, and output data will not be deleted."
+                    f"Stop and remove {display_name} from device startup?\n\n"
+                    "Its editable schedule remains in the deployment manifest. "
+                    "Camera configs and output data will not be deleted."
                 )
             if not messagebox.askyesno("Startup Service", question, parent=dialog):
                 return
@@ -844,7 +1135,10 @@ class DeploymentWindow:
                         task_path,
                     )
                     self.auto_start_var.set(False)
-            except OSError as exc:
+                    manifest_value = str(entry.get("manifest", "")).strip()
+                    if manifest_value:
+                        set_startup_enabled(Path(manifest_value), False)
+            except (ManifestError, OSError) as exc:
                 messagebox.showerror("Startup Service", str(exc), parent=dialog)
                 return
 
@@ -861,6 +1155,8 @@ class DeploymentWindow:
             dialog.after(2500, refresh_if_open)
 
         task_tree.bind("<<TreeviewSelect>>", update_selection)
+        edit_button.configure(command=edit_schedule)
+        repair_button.configure(command=repair_registration)
         stop_button.configure(command=lambda: run_operation("stop"))
         remove_button.configure(command=lambda: run_operation("remove"))
         refresh_button.configure(command=refresh)

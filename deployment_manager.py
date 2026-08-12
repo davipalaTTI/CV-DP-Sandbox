@@ -109,10 +109,21 @@ class CameraJob:
     name: str
     source_name: str
     config_path: Path
+    output_folder: Path
     log_path: Path
     schedule: DailySchedule
     enabled: bool = True
+    save_footage: bool = False
+    footage_retention_days: int = 0
     restart_on_success: bool = True
+
+
+@dataclass(frozen=True)
+class StartupRegistration:
+    configured: bool = False
+    enabled: bool = False
+    windows_task_name: str = "CV-DP Camera Scheduler"
+    linux_service_name: str = "cv-dp-camera-scheduler.service"
 
 
 @dataclass(frozen=True)
@@ -124,6 +135,7 @@ class Deployment:
     shutdown_grace_seconds: float
     debug: bool
     jobs: Tuple[CameraJob, ...]
+    startup: StartupRegistration = StartupRegistration()
 
 
 def read_document(path: Path) -> Dict[str, Any]:
@@ -140,6 +152,50 @@ def read_document(path: Path) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ManifestError(f"{path} must contain an object at its root")
     return data
+
+
+def set_startup_enabled(manifest_path: Path, enabled: bool) -> Path:
+    """Atomically persist the desired boot-registration state in a deployment."""
+    manifest_path = manifest_path.expanduser().resolve()
+    data = read_document(manifest_path)
+    startup = data.get("startup")
+    if startup is None:
+        startup = {}
+    elif not isinstance(startup, dict):
+        raise ManifestError("startup must be an object")
+    startup.update(
+        {
+            "enabled": bool(enabled),
+            "windows_task_name": str(
+                startup.get("windows_task_name", "CV-DP Camera Scheduler")
+            ),
+            "linux_service_name": str(
+                startup.get(
+                    "linux_service_name",
+                    "cv-dp-camera-scheduler.service",
+                )
+            ),
+        }
+    )
+    data["startup"] = startup
+
+    temp_path = manifest_path.with_name(f".{manifest_path.name}.tmp")
+    try:
+        if manifest_path.suffix.lower() in {".yaml", ".yml"}:
+            import yaml
+
+            content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
+        else:
+            content = json.dumps(data, indent=2) + "\n"
+        with temp_path.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp_path.replace(manifest_path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return manifest_path
 
 
 def _positive_number(data: Dict[str, Any], key: str, default: float) -> float:
@@ -261,14 +317,37 @@ def load_deployment(manifest_path: Path) -> Deployment:
         if not isinstance(enabled, bool):
             raise ManifestError(f"Camera {name!r} enabled must be true or false")
 
+        save_footage = raw_job.get(
+            "save_footage",
+            source_config.get("save_video", True),
+        )
+        if not isinstance(save_footage, bool):
+            raise ManifestError(f"Camera {name!r} save_footage must be true or false")
+
+        retention_days = raw_job.get(
+            "footage_retention_days",
+            source_config.get("footage_retention_days", 0),
+        )
+        if isinstance(retention_days, bool) or not isinstance(retention_days, int):
+            raise ManifestError(
+                f"Camera {name!r} footage_retention_days must be a whole number"
+            )
+        if retention_days < 0:
+            raise ManifestError(
+                f"Camera {name!r} footage_retention_days cannot be negative"
+            )
+
         jobs.append(
             CameraJob(
                 name=name,
                 source_name=source_name,
                 config_path=config_path,
+                output_folder=output_folder,
                 log_path=log_path,
                 schedule=schedule,
                 enabled=enabled,
+                save_footage=save_footage,
+                footage_retention_days=retention_days,
                 restart_on_success=bool(
                     source_config.get("is_camera")
                     or source_config.get("input_type") in {"camera", "rtsp"}
@@ -280,6 +359,42 @@ def load_deployment(manifest_path: Path) -> Deployment:
     if not isinstance(debug, bool):
         raise ManifestError("debug must be true or false")
 
+    raw_startup = data.get("startup")
+    if raw_startup is None:
+        startup = StartupRegistration()
+    elif not isinstance(raw_startup, dict):
+        raise ManifestError("startup must be an object")
+    else:
+        startup_enabled = raw_startup.get("enabled", False)
+        if not isinstance(startup_enabled, bool):
+            raise ManifestError("startup.enabled must be true or false")
+        windows_task_name = str(
+            raw_startup.get("windows_task_name", "CV-DP Camera Scheduler")
+        ).strip()
+        linux_service_name = str(
+            raw_startup.get(
+                "linux_service_name",
+                "cv-dp-camera-scheduler.service",
+            )
+        ).strip()
+        if not windows_task_name:
+            raise ManifestError("startup.windows_task_name cannot be empty")
+        if not re.match(r"^CV[-_ ]?DP(?:[-_ ]|$)", windows_task_name, re.IGNORECASE):
+            raise ManifestError("startup.windows_task_name must begin with CV-DP")
+        if not re.fullmatch(
+            r"cv-dp[A-Za-z0-9_.@-]*\.service",
+            linux_service_name,
+        ):
+            raise ManifestError(
+                "startup.linux_service_name must begin with cv-dp and end with .service"
+            )
+        startup = StartupRegistration(
+            configured=True,
+            enabled=startup_enabled,
+            windows_task_name=windows_task_name,
+            linux_service_name=linux_service_name,
+        )
+
     return Deployment(
         project_root=project_root,
         python_executable=python_executable,
@@ -288,4 +403,5 @@ def load_deployment(manifest_path: Path) -> Deployment:
         shutdown_grace_seconds=_positive_number(data, "shutdown_grace_seconds", 30.0),
         debug=debug,
         jobs=tuple(jobs),
+        startup=startup,
     )
