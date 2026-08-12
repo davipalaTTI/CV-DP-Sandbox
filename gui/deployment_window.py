@@ -804,7 +804,7 @@ class DeploymentWindow:
         """Open the platform authentication prompt for persistent boot startup."""
         try:
             set_startup_enabled(manifest_path, True)
-            prompt = launch_startup_install(
+            prompt = self._run_startup_installer(
                 self.project_root,
                 manifest_path,
                 sys.executable,
@@ -813,9 +813,14 @@ class DeploymentWindow:
                     if sys.platform == "win32"
                     else self.linux_service_name
                 ),
+                False,
+                self.root,
             )
         except (ManifestError, OSError) as exc:
             messagebox.showerror("Startup Service", str(exc), parent=self.root)
+            return False
+
+        if prompt is None:
             return False
 
         messagebox.showinfo(
@@ -824,6 +829,72 @@ class DeploymentWindow:
             parent=self.root,
         )
         return True
+
+    def _run_startup_installer(
+        self,
+        project_root: Path,
+        manifest_path: Path,
+        python_executable: str,
+        registration_name: Optional[str],
+        start_now: bool,
+        parent: tk.Misc,
+    ) -> Optional[str]:
+        """Run elevation off the Tk thread and wait with a responsive progress dialog."""
+        progress = tk.Toplevel(parent)
+        progress.title("Installing Startup Registration")
+        progress.transient(parent)
+        progress.resizable(False, False)
+        progress.protocol("WM_DELETE_WINDOW", lambda: None)
+        body = ttk.Frame(progress, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text="Complete the administrator prompt. Verifying the startup registration...",
+            wraplength=430,
+        ).pack(anchor="w")
+        indicator = ttk.Progressbar(body, mode="indeterminate", length=430)
+        indicator.pack(fill="x", pady=(14, 0))
+        indicator.start(12)
+        state = {"done": False, "prompt": None, "error": None}
+
+        def worker() -> None:
+            try:
+                state["prompt"] = launch_startup_install(
+                    project_root,
+                    manifest_path,
+                    python_executable,
+                    registration_name,
+                    start_now=start_now,
+                )
+            except (ManifestError, OSError) as exc:
+                state["error"] = str(exc)
+            finally:
+                state["done"] = True
+
+        def poll() -> None:
+            if state["done"]:
+                indicator.stop()
+                try:
+                    progress.grab_release()
+                except tk.TclError:
+                    pass
+                progress.destroy()
+                return
+            progress.after(100, poll)
+
+        threading.Thread(
+            target=worker,
+            name="startup-registration-install",
+            daemon=True,
+        ).start()
+        progress.grab_set()
+        progress.after(100, poll)
+        parent.wait_window(progress)
+
+        if state["error"]:
+            messagebox.showerror("Startup Service", state["error"], parent=parent)
+            return None
+        return state["prompt"]
 
     def _show_startup_status(self) -> None:
         service_kind = startup_service_kind().lower()
@@ -1077,22 +1148,25 @@ class DeploymentWindow:
                 set_startup_enabled(manifest, True)
                 deployment = load_deployment(manifest)
                 self.auto_start_var.set(True)
-                prompt = launch_startup_install(
+                prompt = self._run_startup_installer(
                     deployment.project_root,
                     manifest.resolve(),
                     str(deployment.python_executable),
                     str(entry.get("task_name", "")) or None,
-                    start_now=True,
+                    True,
+                    dialog,
                 )
             except (ManifestError, OSError) as exc:
                 messagebox.showerror("Startup Service", str(exc), parent=dialog)
                 return
+            if prompt is None:
+                return
             messagebox.showinfo(
                 "Startup Service",
-                f"{prompt}\n\nUse Refresh after authentication completes.",
+                prompt,
                 parent=dialog,
             )
-            dialog.after(2500, lambda: dialog.winfo_exists() and refresh())
+            refresh()
 
         def run_operation(operation: str) -> None:
             entry = selected_entry()

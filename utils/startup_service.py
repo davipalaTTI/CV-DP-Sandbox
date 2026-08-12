@@ -64,21 +64,46 @@ def launch_startup_install(
     if sys.platform == "win32":
         task_name = registration_name or WINDOWS_TASK_NAME
         installer = project_root / "scripts" / "install_windows_startup_task.ps1"
+        if not installer.is_file():
+            raise OSError(f"Startup task installer was not found: {installer}")
+        log_path = project_root / "logs" / "startup_service_operation.log"
         command = (
             f"& {_powershell_quote(installer)} "
             f"-Manifest {_powershell_quote(manifest_path)} "
             f"-PythonExecutable {_powershell_quote(python_executable)} "
-            f"-TaskName {_powershell_quote(task_name)}"
+            f"-TaskName {_powershell_quote(task_name)} "
+            f"-OperationLog {_powershell_quote(log_path)}"
         )
         if start_now:
             command += " -StartNow"
         parameters = _powershell_encoded_parameters(command)
-        _launch_windows_elevated(project_root, parameters)
+        try:
+            _launch_windows_elevated(project_root, parameters)
+        except OSError as exc:
+            detail = _read_operation_log(log_path)
+            if detail:
+                raise OSError(f"{exc}\n\n{detail}") from exc
+            raise
+        entries = _query_windows_entries(project_root)
+        registered = next(
+            (
+                entry
+                for entry in entries
+                if str(entry.get("task_name", "")).casefold() == task_name.casefold()
+                and bool(entry.get("registered", False))
+            ),
+            None,
+        )
+        if registered is None:
+            detail = _read_operation_log(log_path)
+            raise OSError(
+                "Windows completed the installer but the startup task is still not "
+                f"registered.\n\n{detail or f'Operation log: {log_path}'}"
+            )
         action = " and start it now" if start_now else ""
         return (
-            "Accept the administrator prompt to enable startup after every Windows boot. "
-            f"The task will be registered{action}. A boot during an active schedule "
-            "starts the camera immediately."
+            f"The Windows startup task is registered{action}. A boot during an active "
+            f"schedule starts the camera immediately. Operation details: {log_path}"
         )
 
     if sys.platform.startswith("linux"):
@@ -359,18 +384,52 @@ def _query_linux_status(service_name: str = LINUX_SERVICE_NAME) -> Dict:
 
 
 def _launch_windows_elevated(project_root: Path, parameters: str) -> None:
-    import ctypes
-
-    result = ctypes.windll.shell32.ShellExecuteW(
-        None,
-        "runas",
-        "powershell.exe",
-        parameters,
-        str(project_root),
-        1,
+    encoded_command = parameters.rsplit(" ", 1)[-1]
+    launcher = (
+        "$ErrorActionPreference='Stop'; "
+        "$process = Start-Process -FilePath 'powershell.exe' -Verb RunAs "
+        "-WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy',"
+        f"'Bypass','-EncodedCommand','{encoded_command}') -Wait -PassThru; "
+        "exit $process.ExitCode"
     )
-    if result <= 32:
-        raise OSError(f"Windows ShellExecute error {result}")
+    kwargs = {}
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                launcher,
+            ],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=180,
+            **kwargs,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise OSError(
+            "The Windows administrator operation timed out. Complete the UAC prompt "
+            "and try Install / Repair again."
+        ) from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise OSError(
+            detail
+            or "The Windows administrator operation was canceled or failed."
+        )
+
+
+def _read_operation_log(log_path: Path, max_characters: int = 4000) -> str:
+    try:
+        content = log_path.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        return ""
+    return content[-max_characters:]
 
 
 def _launch_linux_elevated(

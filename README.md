@@ -293,6 +293,13 @@ immediately. To repair an existing `Loaded: bad-setting` service, use **Install 
 Repair** or rerun the command above. GUI operation output is written to
 `logs/startup_service_operation.log`.
 
+On Windows, **Install / Repair** also waits for the elevated PowerShell installer
+to finish and confirms that Task Scheduler can read the registered task. A denied
+UAC prompt, missing Python/manifest path, Task Scheduler policy error, or failed
+registration is shown in the GUI and recorded in
+`logs/startup_service_operation.log`; the GUI no longer treats merely launching
+PowerShell as a successful installation.
+
 Inspect or remove the Jetson service with:
 
 ```bash
