@@ -3,6 +3,7 @@ param(
     [string]$Manifest,
     [string]$TaskName = "CV-DP Camera Scheduler",
     [string]$PythonExecutable = "",
+    [string]$ViewerUserSid = "",
     [string]$OperationLog = "",
     [switch]$StartNow
 )
@@ -19,7 +20,62 @@ Set-Content -LiteralPath $OperationLog -Encoding UTF8 -Value @(
     "Started=$((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
     "TaskName=$TaskName"
     "Manifest=$Manifest"
+    "ViewerUserSid=$ViewerUserSid"
 )
+
+function Grant-TaskReadAccess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$UserSid
+    )
+
+    $Identity = [System.Security.Principal.SecurityIdentifier]::new($UserSid)
+    $TaskService = New-Object -ComObject "Schedule.Service"
+    $TaskService.Connect()
+    $TaskFolder = $TaskService.GetFolder("\")
+    $ComTask = $TaskFolder.GetTask($Name)
+    $ExistingSddl = $ComTask.GetSecurityDescriptor(0x7)
+    $Descriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new(
+        $ExistingSddl
+    )
+
+    # FILE_GENERIC_READ | FILE_GENERIC_EXECUTE. Management operations still use UAC.
+    $ReadExecuteMask = 0x1200A9
+    $HasAccess = $false
+    foreach ($ExistingAce in $Descriptor.DiscretionaryAcl) {
+        if (
+            $ExistingAce.AceQualifier -eq `
+                [System.Security.AccessControl.AceQualifier]::AccessAllowed -and
+            $null -ne $ExistingAce.SecurityIdentifier -and
+            $ExistingAce.SecurityIdentifier.Value -eq $Identity.Value -and
+            ($ExistingAce.AccessMask -band $ReadExecuteMask) -eq $ReadExecuteMask
+        ) {
+            $HasAccess = $true
+            break
+        }
+    }
+    if (-not $HasAccess) {
+        $Ace = [System.Security.AccessControl.CommonAce]::new(
+            [System.Security.AccessControl.AceFlags]::None,
+            [System.Security.AccessControl.AceQualifier]::AccessAllowed,
+            $ReadExecuteMask,
+            $Identity,
+            $false,
+            $null
+        )
+        $Descriptor.DiscretionaryAcl.InsertAce(
+            $Descriptor.DiscretionaryAcl.Count,
+            $Ace
+        )
+        $Sections = `
+            [System.Security.AccessControl.AccessControlSections]::Owner -bor `
+            [System.Security.AccessControl.AccessControlSections]::Group -bor `
+            [System.Security.AccessControl.AccessControlSections]::Access
+        $ComTask.SetSecurityDescriptor($Descriptor.GetSddlForm($Sections), 0)
+    }
+}
 
 try {
     $Runner = Join-Path $ProjectRoot "scripts\scheduled_runner.py"
@@ -77,6 +133,11 @@ try {
         -ErrorAction Stop
     if ($RegisteredTask.TaskName -ne $TaskName) {
         throw "Windows did not register startup task: $TaskName"
+    }
+    if ($ViewerUserSid) {
+        Grant-TaskReadAccess -Name $TaskName -UserSid $ViewerUserSid
+        Add-Content -LiteralPath $OperationLog -Encoding UTF8 -Value `
+            "ViewerAccess=ReadExecute"
     }
     if ($StartNow) {
         Start-ScheduledTask -TaskName $TaskName -TaskPath "\" -ErrorAction Stop

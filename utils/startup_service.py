@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import csv
+import io
 import json
 import shlex
 import shutil
@@ -68,11 +70,13 @@ def launch_startup_install(
         if not installer.is_file():
             raise OSError(f"Startup task installer was not found: {installer}")
         log_path = project_root / "logs" / "startup_service_operation.log"
+        viewer_user_sid = _current_windows_user_sid()
         command = (
             f"& {_powershell_quote(installer)} "
             f"-Manifest {_powershell_quote(manifest_path)} "
             f"-PythonExecutable {_powershell_quote(python_executable)} "
             f"-TaskName {_powershell_quote(task_name)} "
+            f"-ViewerUserSid {_powershell_quote(viewer_user_sid)} "
             f"-OperationLog {_powershell_quote(log_path)}"
         )
         if start_now:
@@ -261,6 +265,32 @@ def _powershell_quote(value) -> str:
 def _powershell_encoded_parameters(command: str) -> str:
     encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
     return f"-NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"
+
+
+def _current_windows_user_sid() -> str:
+    """Return the unelevated GUI user's SID for task visibility permissions."""
+    kwargs = {}
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    completed = subprocess.run(
+        ["whoami.exe", "/user", "/fo", "csv", "/nh"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        **kwargs,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise OSError(detail or "Windows could not determine the current user SID")
+    try:
+        row = next(csv.reader(io.StringIO(completed.stdout.strip())))
+        sid = row[1].strip()
+    except (IndexError, StopIteration) as exc:
+        raise OSError("Windows returned an invalid current-user identity") from exc
+    parts = sid.split("-")
+    if len(parts) < 3 or parts[0] != "S" or not all(part.isdigit() for part in parts[1:]):
+        raise OSError(f"Windows returned an invalid current-user SID: {sid!r}")
+    return sid
 
 
 def _query_linux_entries() -> List[Dict]:

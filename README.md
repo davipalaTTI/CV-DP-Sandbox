@@ -300,6 +300,11 @@ registration is shown in the GUI and recorded in
 `logs/startup_service_operation.log`; the GUI no longer treats merely launching
 PowerShell as a successful installation.
 
+The startup task runs as SYSTEM, but installation adds read/execute permission for
+the Windows user running the GUI. This is required on standard-user and managed
+remote-PC accounts: Windows can otherwise let the elevated installer create and
+verify the task while hiding that same task from the non-elevated startup manager.
+
 Inspect or remove the Jetson service with:
 
 ```bash
